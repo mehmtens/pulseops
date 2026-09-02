@@ -1,0 +1,10 @@
+.env
+node_modules/
+dist/
+coverage/
+work/
+outputs/
+*.exe
+*.test
+*.tsbuildinfo
+.DS_Store

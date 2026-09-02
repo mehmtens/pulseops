@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pulseops}
+      POSTGRES_USER: ${POSTGRES_USER:-pulseops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulseops-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build: ./api
+    environment:
+      API_ADDR: :8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://pulseops:pulseops-local@postgres:5432/pulseops?sslmode=disable}
+      PULSEOPS_API_TOKEN: ${PULSEOPS_API_TOKEN:-pulseops-local-token}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      SSL_WARNING_DAYS: ${SSL_WARNING_DAYS:-14}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build: ./web
+    environment:
+      PULSEOPS_SITE_ADDRESS: ${PULSEOPS_SITE_ADDRESS:-:80}
+    ports:
+      - "${WEB_PORT:-3000}:80"
+      - "${WEB_HTTPS_PORT:-3443}:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,91 @@
+import { FormEvent, useCallback, useEffect, useState } from 'react'
+
+type Monitor = {
+  id: number; name: string; url: string; intervalSeconds: number; timeoutSeconds: number; active: boolean; public: boolean
+  lastCheckedAt: string | null; lastStatusCode: number | null; lastResponseMs: number | null; lastError: string | null
+  certificateExpiresAt: string | null; uptime24h: number; incidentStartedAt: string | null
+}
+type MonitorForm = { name: string; url: string; intervalSeconds: number; timeoutSeconds: number; active: boolean; public: boolean }
+const blank: MonitorForm = { name: '', url: '', intervalSeconds: 60, timeoutSeconds: 10, active: true, public: true }
+
+function stateOf(monitor: Monitor) {
+  if (!monitor.active) return 'paused'
+  if (!monitor.lastCheckedAt) return 'pending'
+  return monitor.incidentStartedAt ? 'down' : 'up'
+}
+
+function date(value: string | null) {
+  return value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Not checked yet'
+}
+
+function PublicStatus() {
+  const [monitors, setMonitors] = useState<Monitor[]>([])
+  const [updatedAt, setUpdatedAt] = useState('')
+  const load = useCallback(async () => {
+    const response = await fetch('/api/status')
+    if (!response.ok) return
+    const data = await response.json()
+    setMonitors(data.monitors); setUpdatedAt(data.updatedAt)
+  }, [])
+  useEffect(() => { load(); const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load])
+  const operational = monitors.every((monitor) => stateOf(monitor) !== 'down')
+  return <div className="shell status-page">
+    <header><a className="brand" href="/">Pulse<span>Ops</span></a><span className="live"><i /> Live</span></header>
+    <main>
+      <section className={`hero-status ${operational ? 'healthy' : 'outage'}`}><div className="big-dot" /><div><p className="kicker">CURRENT STATUS</p><h1>{operational ? 'All systems operational' : 'Service disruption detected'}</h1><p>{updatedAt ? `Updated ${date(updatedAt)}` : 'Loading current status…'}</p></div></section>
+      <div className="status-list">{monitors.length === 0 ? <div className="empty">No public services configured.</div> : monitors.map((monitor) => <article className="status-row" key={monitor.id}><div><h2>{monitor.name}</h2><p>{monitor.uptime24h.toFixed(2)}% uptime over 24 hours</p></div><span className={`pill ${stateOf(monitor)}`}>{stateOf(monitor)}</span></article>)}</div>
+    </main>
+    <footer>Powered by PulseOps</footer>
+  </div>
+}
+
+export function App() {
+  if (location.pathname === '/status') return <PublicStatus />
+  const [token, setToken] = useState(() => sessionStorage.getItem('pulseops-token') || '')
+  const [draftToken, setDraftToken] = useState('')
+  const [monitors, setMonitors] = useState<Monitor[]>([])
+  const [form, setForm] = useState<MonitorForm>(blank)
+  const [editing, setEditing] = useState<number | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const request = useCallback(async (path: string, options: RequestInit = {}) => {
+    const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...options.headers } })
+    if (response.status === 401) { sessionStorage.removeItem('pulseops-token'); setToken(''); throw new Error('Session expired') }
+    if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error || 'Request failed') }
+    return response.status === 204 ? null : response.json()
+  }, [token])
+  const load = useCallback(async () => { if (!token) return; try { setMonitors(await request('/api/monitors')); setError('') } catch (err) { setError((err as Error).message) } }, [request, token])
+  useEffect(() => { load() }, [load])
+  useEffect(() => { if (!token) return; const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load, token])
+
+  function login(event: FormEvent) { event.preventDefault(); const clean = draftToken.trim(); if (clean.length < 16) { setError('Token must be at least 16 characters.'); return }; sessionStorage.setItem('pulseops-token', clean); setToken(clean); setError('') }
+  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(''); try { await request(editing ? `/api/monitors/${editing}` : '/api/monitors', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(form) }); setForm(blank); setEditing(null); await load() } catch (err) { setError((err as Error).message) } finally { setBusy(false) } }
+  function edit(monitor: Monitor) { setEditing(monitor.id); setForm({ name: monitor.name, url: monitor.url, intervalSeconds: monitor.intervalSeconds, timeoutSeconds: monitor.timeoutSeconds, active: monitor.active, public: monitor.public }); scrollTo({ top: 0, behavior: 'smooth' }) }
+  async function remove(monitor: Monitor) { if (!confirm(`Delete ${monitor.name} and its history?`)) return; try { await request(`/api/monitors/${monitor.id}`, { method: 'DELETE' }); await load() } catch (err) { setError((err as Error).message) } }
+
+  if (!token) return <div className="login"><div className="login-card"><a className="brand" href="/">Pulse<span>Ops</span></a><p className="kicker">CONTROL ROOM</p><h1>See trouble before your users do.</h1><p>Enter the API token configured on your PulseOps server.</p><form onSubmit={login}><label>API token<input type="password" value={draftToken} onChange={(e) => setDraftToken(e.target.value)} autoComplete="current-password" required /></label>{error && <p className="error" role="alert">{error}</p>}<button>Open dashboard</button></form><a className="public-link" href="/status">View public status page →</a></div></div>
+
+  const down = monitors.filter((m) => stateOf(m) === 'down').length
+  const average = monitors.length ? monitors.reduce((sum, m) => sum + m.uptime24h, 0) / monitors.length : 100
+  return <div className="shell dashboard">
+    <header><a className="brand" href="/">Pulse<span>Ops</span></a><nav><a href="/status">Public status</a><button className="text-button" onClick={() => { sessionStorage.removeItem('pulseops-token'); setToken('') }}>Sign out</button></nav></header>
+    <main>
+      <div className="headline"><div><p className="kicker">CONTROL ROOM</p><h1>Good {new Date().getHours() < 12 ? 'morning' : 'evening'}.</h1><p>Everything that matters, in one quiet place.</p></div><div className={`overview ${down ? 'outage' : ''}`}><i />{down ? `${down} incident${down > 1 ? 's' : ''}` : 'All clear'}</div></div>
+      <div className="metrics"><div><strong>{monitors.length}</strong><span>Monitors</span></div><div><strong>{average.toFixed(2)}%</strong><span>24h uptime</span></div><div><strong>{down}</strong><span>Open incidents</span></div></div>
+      <section className="panel form-panel"><div><p className="kicker">{editing ? 'EDIT MONITOR' : 'NEW MONITOR'}</p><h2>{editing ? 'Update endpoint' : 'Watch an endpoint'}</h2></div><form onSubmit={save}>
+        <label>Name<input value={form.name} maxLength={100} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Marketing site" required /></label>
+        <label className="wide">HTTP/HTTPS URL<input type="url" value={form.url} maxLength={2048} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://example.com/health" required /></label>
+        <label>Interval (seconds)<input type="number" min={15} max={86400} value={form.intervalSeconds} onChange={(e) => setForm({ ...form, intervalSeconds: Number(e.target.value) })} required /></label>
+        <label>Timeout (seconds)<input type="number" min={1} max={30} value={form.timeoutSeconds} onChange={(e) => setForm({ ...form, timeoutSeconds: Number(e.target.value) })} required /></label>
+        <label className="check"><input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} /> Active</label><label className="check"><input type="checkbox" checked={form.public} onChange={(e) => setForm({ ...form, public: e.target.checked })} /> Public</label>
+        <div className="actions"><button disabled={busy}>{busy ? 'Saving…' : editing ? 'Save changes' : 'Add monitor'}</button>{editing && <button type="button" className="secondary" onClick={() => { setEditing(null); setForm(blank) }}>Cancel</button>}</div>
+      </form></section>
+      {error && <p className="error banner" role="alert">{error}</p>}
+      <section className="monitor-section"><div className="section-title"><div><p className="kicker">ENDPOINTS</p><h2>Your monitors</h2></div><button className="secondary" onClick={load}>Refresh</button></div>
+        <div className="monitor-grid">{monitors.length === 0 ? <div className="empty">Add your first endpoint above. PulseOps will check it within seconds.</div> : monitors.map((monitor) => <article className="monitor-card" key={monitor.id}><div className="card-top"><span className={`pill ${stateOf(monitor)}`}>{stateOf(monitor)}</span><span className="uptime">{monitor.uptime24h.toFixed(2)}%</span></div><h3>{monitor.name}</h3><a href={monitor.url} target="_blank" rel="noreferrer">{monitor.url}</a><div className="card-data"><div><span>Response</span><strong>{monitor.lastResponseMs == null ? '—' : `${monitor.lastResponseMs} ms`}</strong></div><div><span>Last check</span><strong>{date(monitor.lastCheckedAt)}</strong></div><div><span>SSL expiry</span><strong>{monitor.certificateExpiresAt ? date(monitor.certificateExpiresAt) : '—'}</strong></div></div>{monitor.lastError && <p className="incident">{monitor.lastError}</p>}<div className="card-actions"><button className="secondary" onClick={() => edit(monitor)}>Edit</button><button className="danger" onClick={() => remove(monitor)}>Delete</button></div></article>)}</div>
+      </section>
+    </main>
+    <footer>PulseOps · PostgreSQL-backed monitoring</footer>
+  </div>
+}

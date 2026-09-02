@@ -1,0 +1,32 @@
+# PulseOps roadmap
+
+## Completed MVP
+
+- [x] Go API, React + TypeScript, PostgreSQL, Caddy, Docker Compose, CI, and health/readiness checks.
+- [x] Validated monitor CRUD with protected administrative endpoints.
+- [x] PostgreSQL-backed scheduling and multi-instance-safe due-check claims.
+- [x] Response history, 24-hour uptime, and automatic incident open/resolve behavior.
+- [x] SSL certificate expiry tracking and warning events.
+- [x] Durable, idempotent Brevo notification outbox with retry backoff.
+- [x] Server-Sent Events dashboard refresh and public status page.
+- [x] Embedded, locked migrations; SSRF controls; security headers; graceful shutdown; retention; backup/restore guidance.
+
+## Verification criteria met
+
+1. Backend unit tests pass.
+2. Frontend test and production TypeScript build pass.
+3. Fresh Docker Compose stack reaches healthy PostgreSQL and ready API.
+4. Real HTTPS monitor records HTTP status, response time, uptime, and certificate expiry.
+5. A failing response opens an incident and a healthy response resolves it.
+6. Unauthorized administration returns HTTP 401; public status contains only public monitors.
+
+## Post-MVP options
+
+Only add these when a real deployment needs them:
+
+- Multi-user accounts, organizations, and role-based access.
+- Additional notification channels such as Slack or webhooks.
+- Regional checker workers and geographic consensus.
+- Configurable maintenance windows and incident annotations.
+- Long-term rollups beyond the built-in 90-day raw-check retention.
+- OpenTelemetry export and deployment-specific dashboards.
