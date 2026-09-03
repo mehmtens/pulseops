@@ -10,10 +10,11 @@ describe('App', () => {
 
   it('shows reliability controls on the dashboard', async () => {
     sessionStorage.setItem('pulseops-token', '0123456789abcdef')
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => [] })))
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => ({ ok: true, status: 200, json: async () => path.includes('/reports/') ? { days: 30, monitors: [] } : [] })))
     vi.stubGlobal('EventSource', class { addEventListener() {}; close() {} })
     render(<App />)
     expect(await screen.findByLabelText('Failures before incident')).toBeInTheDocument()
     expect(screen.getByLabelText(/Maintenance until/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'API keys' })).toBeInTheDocument()
   })
 })

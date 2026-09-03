@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,11 +70,16 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/status", a.publicStatus)
 	mux.HandleFunc("GET /api/events", a.events)
 	mux.Handle("GET /api/monitors", a.authorize(http.HandlerFunc(a.listMonitors)))
-	mux.Handle("POST /api/monitors", a.authorize(http.HandlerFunc(a.createMonitor)))
-	mux.Handle("PUT /api/monitors/{id}", a.authorize(http.HandlerFunc(a.updateMonitor)))
-	mux.Handle("DELETE /api/monitors/{id}", a.authorize(http.HandlerFunc(a.deleteMonitor)))
+	mux.Handle("POST /api/monitors", a.authorizeWrite(http.HandlerFunc(a.createMonitor)))
+	mux.Handle("PUT /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.updateMonitor)))
+	mux.Handle("DELETE /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.deleteMonitor)))
 	mux.Handle("GET /api/monitors/{id}/checks", a.authorize(http.HandlerFunc(a.listChecks)))
 	mux.Handle("GET /api/incidents", a.authorize(http.HandlerFunc(a.listIncidents)))
+	mux.Handle("PATCH /api/incidents/{id}", a.authorizeWrite(http.HandlerFunc(a.updateIncident)))
+	mux.Handle("GET /api/reports/uptime", a.authorize(http.HandlerFunc(a.uptimeReport)))
+	mux.Handle("GET /api/keys", a.authorizeRoot(http.HandlerFunc(a.listKeys)))
+	mux.Handle("POST /api/keys", a.authorizeRoot(http.HandlerFunc(a.createKey)))
+	mux.Handle("DELETE /api/keys/{id}", a.authorizeRoot(http.HandlerFunc(a.deleteKey)))
 	return securityHeaders(mux)
 }
 
@@ -84,10 +92,48 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 func (a *app) authorize(next http.Handler) http.Handler {
+	return a.authorizeScope(false, next)
+}
+func (a *app) authorizeWrite(next http.Handler) http.Handler {
+	return a.authorizeScope(true, next)
+}
+func (a *app) authorizeRoot(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if len(provided) != len(a.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
+		if len(provided) == len(a.token) && subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if a.db != nil && strings.HasPrefix(provided, "po_") {
+			hash := sha256.Sum256([]byte(provided))
+			var exists bool
+			if a.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM api_keys WHERE token_hash=$1)`, hash[:]).Scan(&exists) == nil && exists {
+				writeError(w, 403, "root token required")
+				return
+			}
+		}
+		writeError(w, 401, "unauthorized")
+	})
+}
+func (a *app) authorizeScope(write bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if len(provided) == len(a.token) && subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if a.db == nil || !strings.HasPrefix(provided, "po_") {
 			writeError(w, 401, "unauthorized")
+			return
+		}
+		hash := sha256.Sum256([]byte(provided))
+		var scope string
+		if err := a.db.QueryRow(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE token_hash=$1 RETURNING scope`, hash[:]).Scan(&scope); err != nil {
+			writeError(w, 401, "unauthorized")
+			return
+		}
+		if write && scope != "write" {
+			writeError(w, 403, "write scope required")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -145,7 +191,29 @@ func (a *app) publicStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database error")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"updatedAt": time.Now().UTC(), "monitors": items})
+	rows, err := a.db.Query(r.Context(), `SELECT i.id,m.name,i.started_at,i.resolved_at,i.cause FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.public ORDER BY i.started_at DESC LIMIT 20`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	incidents := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var name, cause string
+		var started time.Time
+		var resolved *time.Time
+		if rows.Scan(&id, &name, &started, &resolved, &cause) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		incidents = append(incidents, map[string]any{"id": id, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause})
+	}
+	if rows.Err() != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"updatedAt": time.Now().UTC(), "monitors": items, "incidents": incidents})
 }
 
 func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
@@ -294,7 +362,7 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(r.Context(), `SELECT i.id,i.monitor_id,m.name,i.started_at,i.resolved_at,i.cause FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.started_at DESC LIMIT 100`)
+	rows, err := a.db.Query(r.Context(), `SELECT i.id,i.monitor_id,m.name,i.started_at,i.resolved_at,i.cause,i.acknowledged_at,i.note FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.started_at DESC LIMIT 100`)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -305,18 +373,152 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 		var id, monitorID int64
 		var name, cause string
 		var started time.Time
-		var resolved *time.Time
-		if err := rows.Scan(&id, &monitorID, &name, &started, &resolved, &cause); err != nil {
+		var resolved, acknowledged *time.Time
+		var note string
+		if err := rows.Scan(&id, &monitorID, &name, &started, &resolved, &cause, &acknowledged, &note); err != nil {
 			writeError(w, 500, "database error")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "monitorId": monitorID, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause})
+		items = append(items, map[string]any{"id": id, "monitorId": monitorID, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause, "acknowledgedAt": acknowledged, "note": note})
 	}
 	if rows.Err() != nil {
 		writeError(w, 500, "database error")
 		return
 	}
 	writeJSON(w, 200, items)
+}
+
+func (a *app) updateIncident(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid incident id")
+		return
+	}
+	var in struct {
+		Acknowledged bool   `json:"acknowledged"`
+		Note         string `json:"note"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	in.Note = strings.TrimSpace(in.Note)
+	if len(in.Note) > 1000 {
+		writeError(w, 400, "note must be at most 1000 characters")
+		return
+	}
+	command, err := a.db.Exec(r.Context(), `UPDATE incidents SET acknowledged_at=CASE WHEN $2 THEN COALESCE(acknowledged_at,now()) ELSE NULL END,note=$3 WHERE id=$1`, id, in.Acknowledged, in.Note)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if command.RowsAffected() == 0 {
+		writeError(w, 404, "incident not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (a *app) uptimeReport(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 90 {
+			writeError(w, 400, "days must be 1-90")
+			return
+		}
+		days = parsed
+	}
+	rows, err := a.db.Query(r.Context(), `SELECT m.id,m.name,COALESCE(100.0*count(c.id) FILTER (WHERE c.up)/NULLIF(count(c.id),0),100),COALESCE(avg(c.response_ms),0)::integer,count(c.id) FROM monitors m LEFT JOIN checks c ON c.monitor_id=m.id AND c.checked_at>now()-($1*interval '1 day') GROUP BY m.id,m.name ORDER BY m.name`, days)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id, average, checks int64
+		var name string
+		var uptime float64
+		if rows.Scan(&id, &name, &uptime, &average, &checks) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		items = append(items, map[string]any{"monitorId": id, "monitorName": name, "uptime": uptime, "averageResponseMs": average, "checks": checks})
+	}
+	writeJSON(w, 200, map[string]any{"days": days, "generatedAt": time.Now().UTC(), "monitors": items})
+}
+
+func (a *app) listKeys(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(r.Context(), `SELECT id,name,token_prefix,scope,last_used_at,created_at FROM api_keys ORDER BY created_at DESC`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var name, prefix, scope string
+		var used *time.Time
+		var created time.Time
+		if rows.Scan(&id, &name, &prefix, &scope, &used, &created) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		items = append(items, map[string]any{"id": id, "name": name, "prefix": prefix, "scope": scope, "lastUsedAt": used, "createdAt": created})
+	}
+	writeJSON(w, 200, items)
+}
+func (a *app) createKey(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name  string `json:"name"`
+		Scope string `json:"scope"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if len(in.Name) < 1 || len(in.Name) > 100 || (in.Scope != "read" && in.Scope != "write") {
+		writeError(w, 400, "name and scope are invalid")
+		return
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		writeError(w, 500, "could not create key")
+		return
+	}
+	token := "po_" + hex.EncodeToString(secret)
+	hash := sha256.Sum256([]byte(token))
+	prefix := token[:11]
+	var id int64
+	if err := a.db.QueryRow(r.Context(), `INSERT INTO api_keys(name,token_hash,token_prefix,scope) VALUES($1,$2,$3,$4) RETURNING id`, in.Name, hash[:], prefix, in.Scope).Scan(&id); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "scope": in.Scope, "prefix": prefix, "token": token})
+}
+func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid key id")
+		return
+	}
+	command, err := a.db.Exec(r.Context(), `DELETE FROM api_keys WHERE id=$1`, id)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if command.RowsAffected() == 0 {
+		writeError(w, 404, "key not found")
+		return
+	}
+	w.WriteHeader(204)
 }
 
 func (a *app) events(w http.ResponseWriter, r *http.Request) {

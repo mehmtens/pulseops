@@ -11,6 +11,7 @@
 - [x] Server-Sent Events dashboard refresh and public status page.
 - [x] Embedded, locked migrations; SSRF controls; security headers; graceful shutdown; retention; backup/restore guidance.
 - [x] Flapping thresholds, maintenance windows, generic webhook alerts, and channel-isolated delivery leases.
+- [x] Scoped API keys, incident acknowledgement/notes, 1–90 day uptime reports, and public incident history.
 
 ## Verification criteria met
 
@@ -28,6 +29,6 @@ Only add these when a real deployment needs them:
 - Multi-user accounts, organizations, and role-based access.
 - First-party notification adapters such as Slack, Telegram, or PagerDuty when generic webhooks are insufficient.
 - Regional checker workers and geographic consensus.
-- Recurring maintenance schedules and incident annotations.
-- Long-term rollups beyond the built-in 90-day raw-check retention.
+- Recurring maintenance schedules.
+- Long-term rollups beyond the built-in 90-day raw-check retention when raw-query performance becomes measurable.
 - OpenTelemetry export and deployment-specific dashboards.

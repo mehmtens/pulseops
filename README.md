@@ -28,6 +28,9 @@ PulseOps watches HTTP and HTTPS endpoints, records response time and uptime, ope
 - **Generic webhooks** — send the same durable incident and SSL events to Slack-compatible relays or your own automation.
 - **Live dashboard** — monitor CRUD, operational metrics, and Server-Sent Events updates.
 - **Public status page** — only monitors explicitly marked public are exposed at `/status`.
+- **Operational follow-through** — acknowledge incidents, attach operator notes, and publish recent public incident history.
+- **30-day reporting** — inspect per-monitor uptime, average response time, and check volume for any 1–90 day window.
+- **Scoped API keys** — create revocable read-only or read/write integration keys; secrets are stored as SHA-256 hashes and shown once.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
 
 ## Architecture
@@ -117,10 +120,14 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `PUT/DELETE` | `/api/monitors/{id}` | Admin | Update/delete a monitor |
 | `GET` | `/api/monitors/{id}/checks` | Admin | Latest 100 checks |
 | `GET` | `/api/incidents` | Admin | Latest 100 incidents |
+| `PATCH` | `/api/incidents/{id}` | Write | Acknowledge an incident and save an operator note |
+| `GET` | `/api/reports/uptime?days=30` | Read | Per-monitor uptime report for 1–90 days |
+| `GET/POST` | `/api/keys` | Root token | List/create scoped API keys |
+| `DELETE` | `/api/keys/{id}` | Root token | Revoke an API key |
 
 ## Security model
 
-PulseOps is designed for a trusted single-operator deployment. Admin operations use a server-configured bearer token; public APIs expose only monitor health marked `public`, never the admin token or notification settings. Endpoint validation rejects credentials in URLs, private/loopback/link-local targets, DNS resolutions to private networks, redirects beyond five hops, and TLS below 1.2.
+PulseOps is designed for a trusted single-operator deployment. The server-configured root token manages API keys. Integration keys can be read-only or read/write, are stored only as hashes, and can be revoked independently. Public APIs expose only monitor health and incidents for monitors marked `public`, never credentials or notification settings. Endpoint validation rejects credentials in URLs, private/loopback/link-local targets, DNS resolutions to private networks, redirects beyond five hops, and TLS below 1.2.
 
 Put internet-facing installations behind HTTPS, use unique secrets, restrict host access, and keep Docker/PostgreSQL patched. PulseOps intentionally does not provide multi-user accounts or organization-level authorization.
 
@@ -177,7 +184,7 @@ CI runs the same backend tests, frontend tests, and production build on every pu
 
 ## Delivery status
 
-The MVP is complete: foundation, monitor CRUD, checks and incidents, SSL/Brevo notifications, live dashboard, public status page, and production hardening are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the verification criteria and sensible post-MVP options.
+The MVP is complete: foundation, monitor CRUD, checks and incidents, scoped API access, reliability reporting, SSL/Brevo/webhook notifications, live dashboard, public incident history, and production hardening are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the verification criteria and sensible post-MVP options.
 
 ---
 
