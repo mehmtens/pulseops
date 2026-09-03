@@ -1,0 +1,39 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "PulseOps API", "version": "1.0.0", "description": "Self-hosted HTTP and heartbeat monitoring API." },
+  "servers": [{ "url": "/" }],
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "parameters": { "id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } } },
+    "schemas": {
+      "MonitorInput": {
+        "type": "object", "required": ["name", "monitorType"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 100 }, "monitorType": { "enum": ["http", "heartbeat"] },
+          "url": { "type": "string", "format": "uri" }, "expectedKeyword": { "type": "string", "maxLength": 500 },
+          "intervalSeconds": { "type": "integer", "minimum": 15, "maximum": 86400 }, "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
+          "failureThreshold": { "type": "integer", "minimum": 1, "maximum": 10 }, "recoveryThreshold": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "active": { "type": "boolean" }, "public": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/healthz": { "get": { "summary": "Process liveness", "responses": { "200": { "description": "Healthy" } } } },
+    "/api/readyz": { "get": { "summary": "Database readiness", "responses": { "200": { "description": "Ready" }, "503": { "description": "Unavailable" } } } },
+    "/api/status": { "get": { "summary": "Public monitor and incident status", "responses": { "200": { "description": "Public status" } } } },
+    "/api/events": { "get": { "summary": "Status Server-Sent Events", "responses": { "200": { "description": "Event stream" } } } },
+    "/api/heartbeat/{token}": { "post": { "summary": "Record a heartbeat", "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Heartbeat recorded" }, "404": { "description": "Unknown heartbeat" } } } },
+    "/api/monitors": {
+      "get": { "summary": "List monitors", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Monitor list" } } },
+      "post": { "summary": "Create a monitor", "security": [{ "bearerAuth": [] }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MonitorInput" } } } }, "responses": { "201": { "description": "Monitor created" } } }
+    },
+    "/api/monitors/{id}": {
+      "put": { "summary": "Update a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Monitor updated" } } },
+      "delete": { "summary": "Delete a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Monitor deleted" } } }
+    },
+    "/api/incidents": { "get": { "summary": "List incidents", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Incident list" } } } },
+    "/api/reports/uptime": { "get": { "summary": "Generate a 1–90 day uptime report", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Uptime report" } } } },
+    "/api/keys": { "get": { "summary": "List API keys", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "API key list" } } }, "post": { "summary": "Create an API key", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Key and one-time secret" } } } }
+  }
+}

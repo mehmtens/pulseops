@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,29 @@ func TestDecodeInput(t *testing.T) {
 	input, err := decodeInput(httptest.NewRecorder(), request)
 	if err != nil || input.IntervalSeconds != 60 || input.TimeoutSeconds != 10 {
 		t.Fatalf("unexpected valid input: %+v, %v", input, err)
+	}
+}
+
+func TestHeartbeatInputAndContentMatch(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(`{"name":"Nightly backup","monitorType":"heartbeat","intervalSeconds":3600}`))
+	input, err := decodeInput(httptest.NewRecorder(), request)
+	if err != nil || input.URL != "" || input.MonitorType != "heartbeat" {
+		t.Fatalf("unexpected heartbeat: %+v, %v", input, err)
+	}
+	if !contentMatches([]byte(`{"status":"ok"}`), "status") || contentMatches([]byte("healthy"), "failed") {
+		t.Fatal("content matching failed")
+	}
+}
+
+func TestOpenAPIDocument(t *testing.T) {
+	var document map[string]any
+	if json.Unmarshal(openAPIDocument, &document) != nil || document["openapi"] != "3.1.0" {
+		t.Fatal("invalid embedded OpenAPI document")
+	}
+	response := httptest.NewRecorder()
+	newApp(nil, "0123456789abcdef").routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/openapi.json", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", response.Code)
 	}
 }
 

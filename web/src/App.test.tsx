@@ -15,6 +15,7 @@ describe('App', () => {
     render(<App />)
     expect(await screen.findByLabelText('Failures before incident')).toBeInTheDocument()
     expect(screen.getByLabelText(/Maintenance until/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Monitor type')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'API keys' })).toBeInTheDocument()
   })
 })

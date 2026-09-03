@@ -22,6 +22,7 @@ import (
 type dueMonitor struct {
 	id                                  int64
 	name, url                           string
+	monitorType, expectedKeyword        string
 	timeoutSeconds                      int
 	failureThreshold, recoveryThreshold int
 	maintenance                         bool
@@ -85,14 +86,14 @@ func (a *app) claimDue(ctx context.Context) ([]dueMonitor, error) {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now() FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
 	items := []dueMonitor{}
 	for rows.Next() {
 		var item dueMonitor
-		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance); err != nil {
+		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -135,6 +136,9 @@ func safeDialer() func(context.Context, string, string) (net.Conn, error) {
 }
 
 func performCheck(parent context.Context, item dueMonitor) checkResult {
+	if item.monitorType == "heartbeat" {
+		return failedResult(0, errors.New("heartbeat overdue"))
+	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(item.timeoutSeconds)*time.Second)
 	defer cancel()
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: safeDialer(), TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: time.Duration(item.timeoutSeconds) * time.Second, DisableKeepAlives: true}
@@ -156,18 +160,25 @@ func performCheck(parent context.Context, item dueMonitor) checkResult {
 		return failedResult(elapsed, err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	status := response.StatusCode
 	result := checkResult{up: status >= 200 && status < 400, statusCode: &status, responseMS: elapsed}
 	if !result.up {
 		message := fmt.Sprintf("HTTP %d", status)
 		result.message = &message
 	}
+	if result.up && !contentMatches(body, item.expectedKeyword) {
+		message := "expected content not found"
+		result.up, result.message = false, &message
+	}
 	if response.TLS != nil && len(response.TLS.PeerCertificates) > 0 {
 		expiry := response.TLS.PeerCertificates[0].NotAfter.UTC()
 		result.certificateExpiresAt = &expiry
 	}
 	return result
+}
+func contentMatches(body []byte, expected string) bool {
+	return expected == "" || bytes.Contains(body, []byte(expected))
 }
 func failedResult(ms int, err error) checkResult {
 	message := err.Error()

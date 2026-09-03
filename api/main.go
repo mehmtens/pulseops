@@ -21,6 +21,9 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+//go:embed openapi.json
+var openAPIDocument []byte
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

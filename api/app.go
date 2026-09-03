@@ -46,6 +46,8 @@ type monitor struct {
 	CertificateExpiresAt *time.Time `json:"certificateExpiresAt"`
 	Uptime24h            float64    `json:"uptime24h"`
 	IncidentStartedAt    *time.Time `json:"incidentStartedAt"`
+	MonitorType          string     `json:"monitorType"`
+	ExpectedKeyword      string     `json:"expectedKeyword"`
 }
 type monitorInput struct {
 	Name              string     `json:"name"`
@@ -57,6 +59,8 @@ type monitorInput struct {
 	FailureThreshold  int        `json:"failureThreshold"`
 	RecoveryThreshold int        `json:"recoveryThreshold"`
 	MaintenanceUntil  *time.Time `json:"maintenanceUntil"`
+	MonitorType       string     `json:"monitorType"`
+	ExpectedKeyword   string     `json:"expectedKeyword"`
 }
 
 func newApp(db *pgxpool.Pool, token string) *app {
@@ -69,6 +73,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/readyz", a.ready)
 	mux.HandleFunc("GET /api/status", a.publicStatus)
 	mux.HandleFunc("GET /api/events", a.events)
+	mux.HandleFunc("POST /api/heartbeat/{token}", a.heartbeat)
+	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
 	mux.Handle("GET /api/monitors", a.authorize(http.HandlerFunc(a.listMonitors)))
 	mux.Handle("POST /api/monitors", a.authorizeWrite(http.HandlerFunc(a.createMonitor)))
 	mux.Handle("PUT /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.updateMonitor)))
@@ -149,11 +155,11 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ready"})
 }
 
-const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL) FROM monitors m`
+const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL),m.monitor_type,m.expected_keyword FROM monitors m`
 
 func scanMonitor(row pgx.Row) (monitor, error) {
 	var m monitor
-	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt)
+	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt, &m.MonitorType, &m.ExpectedKeyword)
 	return m, err
 }
 func (a *app) queryMonitors(ctx context.Context, publicOnly bool) ([]monitor, error) {
@@ -224,12 +230,23 @@ func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
 		return in, errors.New("invalid JSON")
 	}
 	in.Name, in.URL = strings.TrimSpace(in.Name), strings.TrimSpace(in.URL)
-	if len(in.Name) < 1 || len(in.Name) > 100 || len(in.URL) > 2048 {
+	in.ExpectedKeyword = strings.TrimSpace(in.ExpectedKeyword)
+	if in.MonitorType == "" {
+		in.MonitorType = "http"
+	}
+	if len(in.Name) < 1 || len(in.Name) > 100 || len(in.URL) > 2048 || len(in.ExpectedKeyword) > 500 {
 		return in, errors.New("name or URL has an invalid length")
 	}
-	parsed, err := url.ParseRequestURI(in.URL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
-		return in, errors.New("URL must be an absolute HTTP or HTTPS URL without credentials")
+	if in.MonitorType != "http" && in.MonitorType != "heartbeat" {
+		return in, errors.New("monitor type must be http or heartbeat")
+	}
+	if in.MonitorType == "http" {
+		parsed, err := url.ParseRequestURI(in.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
+			return in, errors.New("URL must be an absolute HTTP or HTTPS URL without credentials")
+		}
+	} else {
+		in.URL, in.ExpectedKeyword = "", ""
 	}
 	if in.IntervalSeconds == 0 {
 		in.IntervalSeconds = 60
@@ -272,7 +289,19 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	active, public := defaults(in)
 	var id int64
-	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public,failure_threshold,recovery_threshold,maintenance_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil).Scan(&id); err != nil {
+	var heartbeatToken string
+	var heartbeatHash []byte
+	if in.MonitorType == "heartbeat" {
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			writeError(w, 500, "could not create heartbeat")
+			return
+		}
+		heartbeatToken = "hb_" + hex.EncodeToString(secret)
+		sum := sha256.Sum256([]byte(heartbeatToken))
+		heartbeatHash = sum[:]
+	}
+	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public,failure_threshold,recovery_threshold,maintenance_until,monitor_type,expected_keyword,heartbeat_token_hash,next_check_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10='heartbeat' THEN now()+($3::integer*interval '1 second') ELSE now() END) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.MonitorType, in.ExpectedKeyword, heartbeatHash).Scan(&id); err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
@@ -281,7 +310,11 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database error")
 		return
 	}
-	writeJSON(w, 201, m)
+	if heartbeatToken == "" {
+		writeJSON(w, 201, m)
+		return
+	}
+	writeJSON(w, 201, map[string]any{"monitor": m, "heartbeatToken": heartbeatToken, "heartbeatUrl": "/api/heartbeat/" + heartbeatToken})
 }
 func monitorID(r *http.Request) (int64, error) { return strconv.ParseInt(r.PathValue("id"), 10, 64) }
 func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +329,7 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active, public := defaults(in)
-	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,failure_threshold=$8,recovery_threshold=$9,maintenance_until=$10,next_check_at=LEAST(next_check_at,now()),updated_at=now() WHERE id=$1`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil)
+	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,failure_threshold=$8,recovery_threshold=$9,maintenance_until=$10,expected_keyword=$11,next_check_at=LEAST(next_check_at,now()),updated_at=now() WHERE id=$1 AND monitor_type=$12`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.ExpectedKeyword, in.MonitorType)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -519,6 +552,36 @@ func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+func (a *app) heartbeat(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	if len(token) != 67 || !strings.HasPrefix(token, "hb_") {
+		writeError(w, 404, "heartbeat not found")
+		return
+	}
+	hash := sha256.Sum256([]byte(token))
+	var item dueMonitor
+	err := a.db.QueryRow(r.Context(), `UPDATE monitors SET next_check_at=now()+(interval_seconds*interval '1 second') WHERE heartbeat_token_hash=$1 AND monitor_type='heartbeat' AND active RETURNING id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 404, "heartbeat not found")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if err := a.recordCheck(r.Context(), item, checkResult{up: true}); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	a.broadcast()
+	w.WriteHeader(204)
+}
+
+func (a *app) openAPI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(openAPIDocument) //nolint:errcheck
 }
 
 func (a *app) events(w http.ResponseWriter, r *http.Request) {

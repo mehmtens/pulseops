@@ -14,11 +14,13 @@ A focused, self-hosted uptime monitor and incident communication platform.
 
 ---
 
-PulseOps watches HTTP and HTTPS endpoints, records response time and uptime, opens and resolves incidents automatically, warns before certificates expire, sends Brevo email alerts, and publishes a live status page. It stays intentionally small: one Go service, one PostgreSQL database, one React app, and Caddy at the edge.
+PulseOps watches HTTP and HTTPS endpoints and cron heartbeats, records response time and uptime, opens and resolves incidents automatically, warns before certificates expire, sends alerts, and publishes a live status page. It stays intentionally small: one Go service, one PostgreSQL database, one React app, and Caddy at the edge.
 
 ## What you get
 
 - **Reliable endpoint checks** — configurable 15-second to 24-hour intervals and hard request timeouts.
+- **Cron heartbeats** — a private, one-time URL acts as a dead man's switch for scheduled jobs.
+- **Content assertions** — optionally require expected text within the first 64 KiB of a successful HTTP response.
 - **Incident lifecycle** — a failure opens one incident; recovery resolves it transactionally and keeps a dashboard timeline.
 - **Flapping control** — configurable consecutive failure and recovery thresholds prevent noisy one-off alerts.
 - **Maintenance windows** — continue collecting measurements while suppressing incident transitions and notifications.
@@ -32,6 +34,7 @@ PulseOps watches HTTP and HTTPS endpoints, records response time and uptime, ope
 - **30-day reporting** — inspect per-monitor uptime, average response time, and check volume for any 1–90 day window.
 - **Scoped API keys** — create revocable read-only or read/write integration keys; secrets are stored as SHA-256 hashes and shown once.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
+- **OpenAPI contract** — the machine-readable API description is served at `/api/openapi.json`.
 
 ## Architecture
 
@@ -116,6 +119,8 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET` | `/api/readyz` | Public | PostgreSQL readiness |
 | `GET` | `/api/status` | Public | Public monitor status |
 | `GET` | `/api/events` | Public | Status-only SSE notifications |
+| `POST` | `/api/heartbeat/{token}` | Private URL | Record a successful cron/job heartbeat |
+| `GET` | `/api/openapi.json` | Public | OpenAPI 3.1 description |
 | `GET/POST` | `/api/monitors` | Admin | List/create monitors |
 | `PUT/DELETE` | `/api/monitors/{id}` | Admin | Update/delete a monitor |
 | `GET` | `/api/monitors/{id}/checks` | Admin | Latest 100 checks |
@@ -124,6 +129,14 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET` | `/api/reports/uptime?days=30` | Read | Per-monitor uptime report for 1–90 days |
 | `GET/POST` | `/api/keys` | Root token | List/create scoped API keys |
 | `DELETE` | `/api/keys/{id}` | Root token | Revoke an API key |
+
+For a heartbeat monitor, send a request after the job succeeds:
+
+```bash
+curl -X POST https://status.example.com/api/heartbeat/hb_your_one_time_secret
+```
+
+The heartbeat URL is displayed only when the monitor is created. Store it like a password. If it is lost, create a replacement monitor.
 
 ## Security model
 
@@ -184,7 +197,7 @@ CI runs the same backend tests, frontend tests, and production build on every pu
 
 ## Delivery status
 
-The MVP is complete: foundation, monitor CRUD, checks and incidents, scoped API access, reliability reporting, SSL/Brevo/webhook notifications, live dashboard, public incident history, and production hardening are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the verification criteria and sensible post-MVP options.
+The MVP is complete: HTTP/content and heartbeat monitoring, incidents, scoped API access, reliability reporting, SSL/Brevo/webhook notifications, live dashboard, public incident history, OpenAPI documentation, and production hardening are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the verification criteria and sensible post-MVP options.
 
 ---
 
