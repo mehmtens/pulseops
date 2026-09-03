@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "PulseOps API", "version": "1.0.0", "description": "Self-hosted HTTP and heartbeat monitoring API." },
+  "info": { "title": "PulseOps API", "version": "1.1.0", "description": "Self-hosted HTTP, heartbeat, TCP, and DNS monitoring API." },
   "servers": [{ "url": "/" }],
   "components": {
     "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -9,7 +9,7 @@
       "MonitorInput": {
         "type": "object", "required": ["name", "monitorType"],
         "properties": {
-          "name": { "type": "string", "maxLength": 100 }, "monitorType": { "enum": ["http", "heartbeat"] },
+          "name": { "type": "string", "maxLength": 100 }, "monitorType": { "enum": ["http", "heartbeat", "tcp", "dns"] },
           "url": { "type": "string", "format": "uri" }, "expectedKeyword": { "type": "string", "maxLength": 500 },
           "intervalSeconds": { "type": "integer", "minimum": 15, "maximum": 86400 }, "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
           "failureThreshold": { "type": "integer", "minimum": 1, "maximum": 10 }, "recoveryThreshold": { "type": "integer", "minimum": 1, "maximum": 10 },

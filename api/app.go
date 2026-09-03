@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -237,16 +238,31 @@ func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
 	if len(in.Name) < 1 || len(in.Name) > 100 || len(in.URL) > 2048 || len(in.ExpectedKeyword) > 500 {
 		return in, errors.New("name or URL has an invalid length")
 	}
-	if in.MonitorType != "http" && in.MonitorType != "heartbeat" {
-		return in, errors.New("monitor type must be http or heartbeat")
+	if in.MonitorType != "http" && in.MonitorType != "heartbeat" && in.MonitorType != "tcp" && in.MonitorType != "dns" {
+		return in, errors.New("monitor type must be http, heartbeat, tcp, or dns")
 	}
 	if in.MonitorType == "http" {
 		parsed, err := url.ParseRequestURI(in.URL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil {
 			return in, errors.New("URL must be an absolute HTTP or HTTPS URL without credentials")
 		}
-	} else {
+	} else if in.MonitorType == "heartbeat" {
 		in.URL, in.ExpectedKeyword = "", ""
+	} else {
+		in.ExpectedKeyword = ""
+		if strings.ContainsAny(in.URL, "/?#@ ") {
+			return in, errors.New("network target is invalid")
+		}
+		if in.MonitorType == "tcp" {
+			host, port, err := net.SplitHostPort(in.URL)
+			number, numberErr := strconv.Atoi(port)
+			if err != nil || host == "" || numberErr != nil || number < 1 || number > 65535 {
+				return in, errors.New("TCP target must be host:port")
+			}
+		}
+		if in.MonitorType == "dns" && (in.URL == "" || net.ParseIP(in.URL) != nil) {
+			return in, errors.New("DNS target must be a hostname")
+		}
 	}
 	if in.IntervalSeconds == 0 {
 		in.IntervalSeconds = 60

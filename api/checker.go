@@ -139,6 +139,9 @@ func performCheck(parent context.Context, item dueMonitor) checkResult {
 	if item.monitorType == "heartbeat" {
 		return failedResult(0, errors.New("heartbeat overdue"))
 	}
+	if item.monitorType == "tcp" || item.monitorType == "dns" {
+		return performNetworkCheck(parent, item)
+	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(item.timeoutSeconds)*time.Second)
 	defer cancel()
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: safeDialer(), TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: time.Duration(item.timeoutSeconds) * time.Second, DisableKeepAlives: true}
@@ -176,6 +179,27 @@ func performCheck(parent context.Context, item dueMonitor) checkResult {
 		result.certificateExpiresAt = &expiry
 	}
 	return result
+}
+func performNetworkCheck(parent context.Context, item dueMonitor) checkResult {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(item.timeoutSeconds)*time.Second)
+	defer cancel()
+	started := time.Now()
+	if item.monitorType == "dns" {
+		addresses, err := net.DefaultResolver.LookupHost(ctx, item.url)
+		if err != nil {
+			return failedResult(int(time.Since(started).Milliseconds()), err)
+		}
+		if len(addresses) == 0 {
+			return failedResult(int(time.Since(started).Milliseconds()), errors.New("hostname has no address"))
+		}
+		return checkResult{up: true, responseMS: int(time.Since(started).Milliseconds())}
+	}
+	connection, err := safeDialer()(ctx, "tcp", item.url)
+	if err != nil {
+		return failedResult(int(time.Since(started).Milliseconds()), err)
+	}
+	connection.Close()
+	return checkResult{up: true, responseMS: int(time.Since(started).Milliseconds())}
 }
 func contentMatches(body []byte, expected string) bool {
 	return expected == "" || bytes.Contains(body, []byte(expected))

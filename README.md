@@ -20,6 +20,7 @@ PulseOps watches HTTP and HTTPS endpoints and cron heartbeats, records response 
 
 - **Reliable endpoint checks** — configurable 15-second to 24-hour intervals and hard request timeouts.
 - **Cron heartbeats** — a private, one-time URL acts as a dead man's switch for scheduled jobs.
+- **Network checks** — verify public TCP ports and DNS resolution with the same incident lifecycle.
 - **Content assertions** — optionally require expected text within the first 64 KiB of a successful HTTP response.
 - **Incident lifecycle** — a failure opens one incident; recovery resolves it transactionally and keeps a dashboard timeline.
 - **Flapping control** — configurable consecutive failure and recovery thresholds prevent noisy one-off alerts.

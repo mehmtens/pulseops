@@ -65,6 +65,19 @@ func TestHeartbeatInputAndContentMatch(t *testing.T) {
 	}
 }
 
+func TestNetworkMonitorInput(t *testing.T) {
+	for _, body := range []string{`{"name":"TLS","monitorType":"tcp","url":"example.com:443"}`, `{"name":"DNS","monitorType":"dns","url":"example.com"}`} {
+		request := httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(body))
+		if _, err := decodeInput(httptest.NewRecorder(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(`{"name":"Bad","monitorType":"tcp","url":"example.com"}`))
+	if _, err := decodeInput(httptest.NewRecorder(), request); err == nil {
+		t.Fatal("expected invalid TCP target")
+	}
+}
+
 func TestOpenAPIDocument(t *testing.T) {
 	var document map[string]any
 	if json.Unmarshal(openAPIDocument, &document) != nil || document["openapi"] != "3.1.0" {

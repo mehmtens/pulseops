@@ -13,6 +13,7 @@
 - [x] Flapping thresholds, maintenance windows, generic webhook alerts, and channel-isolated delivery leases.
 - [x] Scoped API keys, incident acknowledgement/notes, 1–90 day uptime reports, and public incident history.
 - [x] Cron heartbeats, HTTP content assertions, and an embedded OpenAPI 3.1 contract.
+- [x] TCP port and DNS resolution monitors using the standard library.
 
 ## Verification criteria met
 
