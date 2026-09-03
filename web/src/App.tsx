@@ -4,15 +4,18 @@ type Monitor = {
   id: number; name: string; url: string; intervalSeconds: number; timeoutSeconds: number; active: boolean; public: boolean
   lastCheckedAt: string | null; lastStatusCode: number | null; lastResponseMs: number | null; lastError: string | null
   certificateExpiresAt: string | null; uptime24h: number; incidentStartedAt: string | null
+  failureThreshold: number; recoveryThreshold: number; consecutiveFailures: number; consecutiveSuccesses: number; maintenanceUntil: string | null
 }
-type MonitorForm = { name: string; url: string; intervalSeconds: number; timeoutSeconds: number; active: boolean; public: boolean }
+type MonitorForm = { name: string; url: string; intervalSeconds: number; timeoutSeconds: number; failureThreshold: number; recoveryThreshold: number; maintenanceUntil: string; active: boolean; public: boolean }
 type Incident = { id: number; monitorName: string; startedAt: string; resolvedAt: string | null; cause: string }
-const blank: MonitorForm = { name: '', url: '', intervalSeconds: 60, timeoutSeconds: 10, active: true, public: true }
+const blank: MonitorForm = { name: '', url: '', intervalSeconds: 60, timeoutSeconds: 10, failureThreshold: 2, recoveryThreshold: 2, maintenanceUntil: '', active: true, public: true }
 
 function stateOf(monitor: Monitor) {
   if (!monitor.active) return 'paused'
+  if (monitor.maintenanceUntil && new Date(monitor.maintenanceUntil) > new Date()) return 'maintenance'
   if (!monitor.lastCheckedAt) return 'pending'
-  return monitor.incidentStartedAt ? 'down' : 'up'
+  if (monitor.incidentStartedAt) return 'down'
+  return monitor.consecutiveFailures > 0 ? 'degraded' : 'up'
 }
 
 function date(value: string | null) {
@@ -62,8 +65,8 @@ export function App() {
   useEffect(() => { if (!token) return; const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load, token])
 
   function login(event: FormEvent) { event.preventDefault(); const clean = draftToken.trim(); if (clean.length < 16) { setError('Token must be at least 16 characters.'); return }; sessionStorage.setItem('pulseops-token', clean); setToken(clean); setError('') }
-  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(''); try { await request(editing ? `/api/monitors/${editing}` : '/api/monitors', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(form) }); setForm(blank); setEditing(null); await load() } catch (err) { setError((err as Error).message) } finally { setBusy(false) } }
-  function edit(monitor: Monitor) { setEditing(monitor.id); setForm({ name: monitor.name, url: monitor.url, intervalSeconds: monitor.intervalSeconds, timeoutSeconds: monitor.timeoutSeconds, active: monitor.active, public: monitor.public }); scrollTo({ top: 0, behavior: 'smooth' }) }
+  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(''); try { const payload = { ...form, maintenanceUntil: form.maintenanceUntil ? new Date(form.maintenanceUntil).toISOString() : null }; await request(editing ? `/api/monitors/${editing}` : '/api/monitors', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) }); setForm(blank); setEditing(null); await load() } catch (err) { setError((err as Error).message) } finally { setBusy(false) } }
+  function edit(monitor: Monitor) { setEditing(monitor.id); const maintenanceUntil = monitor.maintenanceUntil ? new Date(new Date(monitor.maintenanceUntil).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; setForm({ name: monitor.name, url: monitor.url, intervalSeconds: monitor.intervalSeconds, timeoutSeconds: monitor.timeoutSeconds, failureThreshold: monitor.failureThreshold, recoveryThreshold: monitor.recoveryThreshold, maintenanceUntil, active: monitor.active, public: monitor.public }); scrollTo({ top: 0, behavior: 'smooth' }) }
   async function remove(monitor: Monitor) { if (!confirm(`Delete ${monitor.name} and its history?`)) return; try { await request(`/api/monitors/${monitor.id}`, { method: 'DELETE' }); await load() } catch (err) { setError((err as Error).message) } }
 
   if (!token) return <div className="login"><div className="login-card"><a className="brand" href="/">Pulse<span>Ops</span></a><p className="kicker">CONTROL ROOM</p><h1>See trouble before your users do.</h1><p>Enter the API token configured on your PulseOps server.</p><form onSubmit={login}><label>API token<input type="password" value={draftToken} onChange={(e) => setDraftToken(e.target.value)} autoComplete="current-password" required /></label>{error && <p className="error" role="alert">{error}</p>}<button>Open dashboard</button></form><a className="public-link" href="/status">View public status page →</a></div></div>
@@ -80,6 +83,9 @@ export function App() {
         <label className="wide">HTTP/HTTPS URL<input type="url" value={form.url} maxLength={2048} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://example.com/health" required /></label>
         <label>Interval (seconds)<input type="number" min={15} max={86400} value={form.intervalSeconds} onChange={(e) => setForm({ ...form, intervalSeconds: Number(e.target.value) })} required /></label>
         <label>Timeout (seconds)<input type="number" min={1} max={30} value={form.timeoutSeconds} onChange={(e) => setForm({ ...form, timeoutSeconds: Number(e.target.value) })} required /></label>
+        <label>Failures before incident<input type="number" min={1} max={10} value={form.failureThreshold} onChange={(e) => setForm({ ...form, failureThreshold: Number(e.target.value) })} required /></label>
+        <label>Successes before recovery<input type="number" min={1} max={10} value={form.recoveryThreshold} onChange={(e) => setForm({ ...form, recoveryThreshold: Number(e.target.value) })} required /></label>
+        <label className="wide">Maintenance until <span className="optional">optional</span><input type="datetime-local" value={form.maintenanceUntil} onChange={(e) => setForm({ ...form, maintenanceUntil: e.target.value })} /></label>
         <label className="check"><input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} /> Active</label><label className="check"><input type="checkbox" checked={form.public} onChange={(e) => setForm({ ...form, public: e.target.checked })} /> Public</label>
         <div className="actions"><button disabled={busy}>{busy ? 'Saving…' : editing ? 'Save changes' : 'Add monitor'}</button>{editing && <button type="button" className="secondary" onClick={() => { setEditing(null); setForm(blank) }}>Cancel</button>}</div>
       </form></section>

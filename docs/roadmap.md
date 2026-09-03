@@ -10,6 +10,7 @@
 - [x] Durable, idempotent Brevo notification outbox with retry backoff.
 - [x] Server-Sent Events dashboard refresh and public status page.
 - [x] Embedded, locked migrations; SSRF controls; security headers; graceful shutdown; retention; backup/restore guidance.
+- [x] Flapping thresholds, maintenance windows, generic webhook alerts, and channel-isolated delivery leases.
 
 ## Verification criteria met
 
@@ -25,8 +26,8 @@
 Only add these when a real deployment needs them:
 
 - Multi-user accounts, organizations, and role-based access.
-- Additional notification channels such as Slack or webhooks.
+- First-party notification adapters such as Slack, Telegram, or PagerDuty when generic webhooks are insufficient.
 - Regional checker workers and geographic consensus.
-- Configurable maintenance windows and incident annotations.
+- Recurring maintenance schedules and incident annotations.
 - Long-term rollups beyond the built-in 90-day raw-check retention.
 - OpenTelemetry export and deployment-specific dashboards.

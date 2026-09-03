@@ -20,9 +20,11 @@ import (
 )
 
 type dueMonitor struct {
-	id             int64
-	name, url      string
-	timeoutSeconds int
+	id                                  int64
+	name, url                           string
+	timeoutSeconds                      int
+	failureThreshold, recoveryThreshold int
+	maintenance                         bool
 }
 type checkResult struct {
 	up                   bool
@@ -83,14 +85,14 @@ func (a *app) claimDue(ctx context.Context) ([]dueMonitor, error) {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now() FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
 	items := []dueMonitor{}
 	for rows.Next() {
 		var item dueMonitor
-		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds); err != nil {
+		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -185,12 +187,14 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,updated_at=now() WHERE id=$1`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt)
+	var failures, successes int
+	err = tx.QueryRow(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,consecutive_failures=CASE WHEN $6 OR $7 THEN 0 ELSE consecutive_failures+1 END,consecutive_successes=CASE WHEN NOT $6 OR $7 THEN 0 ELSE consecutive_successes+1 END,updated_at=now() WHERE id=$1 RETURNING consecutive_failures,consecutive_successes`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, result.up, item.maintenance).Scan(&failures, &successes)
 	if err != nil {
 		return err
 	}
 	eventKey, subject, body := "", "", ""
-	if !result.up {
+	openIncident, resolveIncident := transition(result.up, item.maintenance, failures, successes, item.failureThreshold, item.recoveryThreshold)
+	if openIncident {
 		var incidentID int64
 		err = tx.QueryRow(ctx, `INSERT INTO incidents(monitor_id,cause) VALUES($1,$2) ON CONFLICT (monitor_id) WHERE resolved_at IS NULL DO NOTHING RETURNING id`, item.id, value(result.message, "check failed")).Scan(&incidentID)
 		if err == nil {
@@ -200,7 +204,7 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-	} else {
+	} else if resolveIncident {
 		var incidentID int64
 		err = tx.QueryRow(ctx, `UPDATE incidents SET resolved_at=now() WHERE monitor_id=$1 AND resolved_at IS NULL RETURNING id`, item.id).Scan(&incidentID)
 		if err == nil {
@@ -211,7 +215,7 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 			return err
 		}
 	}
-	if eventKey == "" && result.certificateExpiresAt != nil {
+	if !item.maintenance && eventKey == "" && result.certificateExpiresAt != nil {
 		days, _ := strconv.Atoi(env("SSL_WARNING_DAYS", "14"))
 		if time.Until(*result.certificateExpiresAt) < time.Duration(days)*24*time.Hour {
 			eventKey = "ssl:" + result.certificateExpiresAt.Format("2006-01-02")
@@ -220,11 +224,19 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		}
 	}
 	if eventKey != "" {
-		if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(monitor_id,event_key,subject,body) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, item.id, eventKey, subject, body); err != nil {
-			return err
+		for _, channel := range configuredChannels() {
+			if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(monitor_id,event_key,subject,body,channel) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, item.id, eventKey, subject, body, channel); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit(ctx)
+}
+func transition(up, maintenance bool, failures, successes, failureThreshold, recoveryThreshold int) (bool, bool) {
+	if maintenance {
+		return false, false
+	}
+	return !up && failures >= failureThreshold, up && successes >= recoveryThreshold
 }
 func value(input *string, fallback string) string {
 	if input != nil {
@@ -234,10 +246,11 @@ func value(input *string, fallback string) string {
 }
 
 func (a *app) deliverNotifications(ctx context.Context) {
-	if os.Getenv("BREVO_API_KEY") == "" || os.Getenv("ALERT_EMAIL_TO") == "" || os.Getenv("ALERT_EMAIL_FROM") == "" {
+	channels := configuredChannels()
+	if len(channels) == 0 {
 		return
 	}
-	rows, err := a.db.Query(ctx, `WITH due AS (SELECT id FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10) UPDATE notification_deliveries n SET attempts=n.attempts+1,next_attempt_at=now()+interval '5 minutes' FROM due WHERE n.id=due.id RETURNING n.id,n.subject,n.body,n.attempts`)
+	rows, err := a.db.Query(ctx, `WITH due AS (SELECT id FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() AND channel=ANY($1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10) UPDATE notification_deliveries n SET attempts=n.attempts+1,next_attempt_at=now()+interval '5 minutes' FROM due WHERE n.id=due.id RETURNING n.id,n.subject,n.body,n.attempts,n.channel`, channels)
 	if err != nil {
 		log.Printf("notification queue: %v", err)
 		return
@@ -246,17 +259,18 @@ func (a *app) deliverNotifications(ctx context.Context) {
 		id            int64
 		subject, body string
 		attempts      int
+		channel       string
 	}
 	items := []pending{}
 	for rows.Next() {
 		var item pending
-		if rows.Scan(&item.id, &item.subject, &item.body, &item.attempts) == nil {
+		if rows.Scan(&item.id, &item.subject, &item.body, &item.attempts, &item.channel) == nil {
 			items = append(items, item)
 		}
 	}
 	rows.Close()
 	for _, item := range items {
-		if err := sendBrevo(item.subject, item.body); err == nil {
+		if err := sendNotification(item.channel, item.subject, item.body); err == nil {
 			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET delivered_at=now() WHERE id=$1`, item.id)
 		} else {
 			delay := 1 << min(item.attempts, 8)
@@ -264,6 +278,44 @@ func (a *app) deliverNotifications(ctx context.Context) {
 			log.Printf("Brevo delivery %d: %v", item.id, err)
 		}
 	}
+}
+
+func configuredChannels() []string {
+	channels := []string{}
+	if os.Getenv("BREVO_API_KEY") != "" && os.Getenv("ALERT_EMAIL_TO") != "" && os.Getenv("ALERT_EMAIL_FROM") != "" {
+		channels = append(channels, "email")
+	}
+	if os.Getenv("ALERT_WEBHOOK_URL") != "" {
+		channels = append(channels, "webhook")
+	}
+	return channels
+}
+
+func sendNotification(channel, subject, body string) error {
+	if channel == "email" {
+		return sendBrevo(subject, body)
+	}
+	return sendWebhook(subject, body)
+}
+
+func sendWebhook(subject, body string) error {
+	target := os.Getenv("ALERT_WEBHOOK_URL")
+	payload, _ := json.Marshal(map[string]string{"event": "pulseops.alert", "subject": subject, "body": body})
+	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "PulseOps/1.0")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("status %d", response.StatusCode)
+	}
+	return nil
 }
 
 func sendBrevo(subject, body string) error {

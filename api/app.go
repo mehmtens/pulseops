@@ -31,6 +31,11 @@ type monitor struct {
 	TimeoutSeconds       int        `json:"timeoutSeconds"`
 	Active               bool       `json:"active"`
 	Public               bool       `json:"public"`
+	FailureThreshold     int        `json:"failureThreshold"`
+	RecoveryThreshold    int        `json:"recoveryThreshold"`
+	ConsecutiveFailures  int        `json:"consecutiveFailures"`
+	ConsecutiveSuccesses int        `json:"consecutiveSuccesses"`
+	MaintenanceUntil     *time.Time `json:"maintenanceUntil"`
 	LastCheckedAt        *time.Time `json:"lastCheckedAt"`
 	LastStatusCode       *int       `json:"lastStatusCode"`
 	LastResponseMS       *int       `json:"lastResponseMs"`
@@ -40,12 +45,15 @@ type monitor struct {
 	IncidentStartedAt    *time.Time `json:"incidentStartedAt"`
 }
 type monitorInput struct {
-	Name            string `json:"name"`
-	URL             string `json:"url"`
-	IntervalSeconds int    `json:"intervalSeconds"`
-	TimeoutSeconds  int    `json:"timeoutSeconds"`
-	Active          *bool  `json:"active"`
-	Public          *bool  `json:"public"`
+	Name              string     `json:"name"`
+	URL               string     `json:"url"`
+	IntervalSeconds   int        `json:"intervalSeconds"`
+	TimeoutSeconds    int        `json:"timeoutSeconds"`
+	Active            *bool      `json:"active"`
+	Public            *bool      `json:"public"`
+	FailureThreshold  int        `json:"failureThreshold"`
+	RecoveryThreshold int        `json:"recoveryThreshold"`
+	MaintenanceUntil  *time.Time `json:"maintenanceUntil"`
 }
 
 func newApp(db *pgxpool.Pool, token string) *app {
@@ -95,11 +103,11 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ready"})
 }
 
-const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL) FROM monitors m`
+const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL) FROM monitors m`
 
 func scanMonitor(row pgx.Row) (monitor, error) {
 	var m monitor
-	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt)
+	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt)
 	return m, err
 }
 func (a *app) queryMonitors(ctx context.Context, publicOnly bool) ([]monitor, error) {
@@ -161,8 +169,20 @@ func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
 	if in.TimeoutSeconds == 0 {
 		in.TimeoutSeconds = 10
 	}
+	if in.FailureThreshold == 0 {
+		in.FailureThreshold = 2
+	}
+	if in.RecoveryThreshold == 0 {
+		in.RecoveryThreshold = 2
+	}
 	if in.IntervalSeconds < 15 || in.IntervalSeconds > 86400 || in.TimeoutSeconds < 1 || in.TimeoutSeconds > 30 {
 		return in, errors.New("interval must be 15-86400 seconds and timeout 1-30 seconds")
+	}
+	if in.FailureThreshold < 1 || in.FailureThreshold > 10 || in.RecoveryThreshold < 1 || in.RecoveryThreshold > 10 {
+		return in, errors.New("failure and recovery thresholds must be 1-10")
+	}
+	if in.MaintenanceUntil != nil && in.MaintenanceUntil.After(time.Now().Add(366*24*time.Hour)) {
+		return in, errors.New("maintenance cannot be scheduled more than one year ahead")
 	}
 	return in, nil
 }
@@ -184,7 +204,7 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	active, public := defaults(in)
 	var id int64
-	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public).Scan(&id); err != nil {
+	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public,failure_threshold,recovery_threshold,maintenance_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil).Scan(&id); err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
@@ -208,7 +228,7 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active, public := defaults(in)
-	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,next_check_at=LEAST(next_check_at,now()),updated_at=now() WHERE id=$1`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public)
+	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,failure_threshold=$8,recovery_threshold=$9,maintenance_until=$10,next_check_at=LEAST(next_check_at,now()),updated_at=now() WHERE id=$1`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return

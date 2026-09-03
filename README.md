@@ -20,9 +20,12 @@ PulseOps watches HTTP and HTTPS endpoints, records response time and uptime, ope
 
 - **Reliable endpoint checks** — configurable 15-second to 24-hour intervals and hard request timeouts.
 - **Incident lifecycle** — a failure opens one incident; recovery resolves it transactionally and keeps a dashboard timeline.
+- **Flapping control** — configurable consecutive failure and recovery thresholds prevent noisy one-off alerts.
+- **Maintenance windows** — continue collecting measurements while suppressing incident transitions and notifications.
 - **Useful history** — response time, HTTP status, errors, 24-hour uptime, and 90-day check retention.
 - **SSL awareness** — certificate expiry capture and configurable early warning.
 - **Durable notifications** — PostgreSQL outbox with idempotency and retry backoff for Brevo email.
+- **Generic webhooks** — send the same durable incident and SSL events to Slack-compatible relays or your own automation.
 - **Live dashboard** — monitor CRUD, operational metrics, and Server-Sent Events updates.
 - **Public status page** — only monitors explicitly marked public are exposed at `/status`.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
@@ -87,6 +90,7 @@ docker compose down
 | `BREVO_API_KEY` | For email | empty | Brevo v3 API key |
 | `ALERT_EMAIL_TO` | For email | empty | Alert recipient |
 | `ALERT_EMAIL_FROM` | For email | empty | Verified Brevo sender |
+| `ALERT_WEBHOOK_URL` | For webhooks | empty | HTTP endpoint receiving PulseOps alert JSON |
 | `SSL_WARNING_DAYS` | No | `14` | Certificate warning threshold |
 
 For a public host, point DNS at the server and use ports 80/443:
@@ -148,6 +152,14 @@ docker compose up --build -d
 ```
 
 The API applies pending migrations before accepting traffic.
+
+### Webhook payload
+
+When `ALERT_WEBHOOK_URL` is configured, PulseOps sends a JSON `POST` and retries non-2xx responses through the same PostgreSQL outbox used for email:
+
+```json
+{"event":"pulseops.alert","subject":"PulseOps incident: API","body":"API is down. HTTP 503"}
+```
 
 ## Development
 
