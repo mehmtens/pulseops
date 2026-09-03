@@ -6,6 +6,7 @@ type Monitor = {
   certificateExpiresAt: string | null; uptime24h: number; incidentStartedAt: string | null
 }
 type MonitorForm = { name: string; url: string; intervalSeconds: number; timeoutSeconds: number; active: boolean; public: boolean }
+type Incident = { id: number; monitorName: string; startedAt: string; resolvedAt: string | null; cause: string }
 const blank: MonitorForm = { name: '', url: '', intervalSeconds: 60, timeoutSeconds: 10, active: true, public: true }
 
 function stateOf(monitor: Monitor) {
@@ -44,6 +45,7 @@ export function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('pulseops-token') || '')
   const [draftToken, setDraftToken] = useState('')
   const [monitors, setMonitors] = useState<Monitor[]>([])
+  const [incidents, setIncidents] = useState<Incident[]>([])
   const [form, setForm] = useState<MonitorForm>(blank)
   const [editing, setEditing] = useState<number | null>(null)
   const [error, setError] = useState('')
@@ -55,7 +57,7 @@ export function App() {
     if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error || 'Request failed') }
     return response.status === 204 ? null : response.json()
   }, [token])
-  const load = useCallback(async () => { if (!token) return; try { setMonitors(await request('/api/monitors')); setError('') } catch (err) { setError((err as Error).message) } }, [request, token])
+  const load = useCallback(async () => { if (!token) return; try { const [nextMonitors, nextIncidents] = await Promise.all([request('/api/monitors'), request('/api/incidents')]); setMonitors(nextMonitors); setIncidents(nextIncidents); setError('') } catch (err) { setError((err as Error).message) } }, [request, token])
   useEffect(() => { load() }, [load])
   useEffect(() => { if (!token) return; const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load, token])
 
@@ -85,6 +87,7 @@ export function App() {
       <section className="monitor-section"><div className="section-title"><div><p className="kicker">ENDPOINTS</p><h2>Your monitors</h2></div><button className="secondary" onClick={load}>Refresh</button></div>
         <div className="monitor-grid">{monitors.length === 0 ? <div className="empty">Add your first endpoint above. PulseOps will check it within seconds.</div> : monitors.map((monitor) => <article className="monitor-card" key={monitor.id}><div className="card-top"><span className={`pill ${stateOf(monitor)}`}>{stateOf(monitor)}</span><span className="uptime">{monitor.uptime24h.toFixed(2)}%</span></div><h3>{monitor.name}</h3><a href={monitor.url} target="_blank" rel="noreferrer">{monitor.url}</a><div className="card-data"><div><span>Response</span><strong>{monitor.lastResponseMs == null ? '—' : `${monitor.lastResponseMs} ms`}</strong></div><div><span>Last check</span><strong>{date(monitor.lastCheckedAt)}</strong></div><div><span>SSL expiry</span><strong>{monitor.certificateExpiresAt ? date(monitor.certificateExpiresAt) : '—'}</strong></div></div>{monitor.lastError && <p className="incident">{monitor.lastError}</p>}<div className="card-actions"><button className="secondary" onClick={() => edit(monitor)}>Edit</button><button className="danger" onClick={() => remove(monitor)}>Delete</button></div></article>)}</div>
       </section>
+      <section className="incident-section"><div className="section-title"><div><p className="kicker">TIMELINE</p><h2>Recent incidents</h2></div></div><div className="timeline">{incidents.length === 0 ? <div className="empty">No incidents recorded.</div> : incidents.map((incident) => <article className="timeline-row" key={incident.id}><i className={incident.resolvedAt ? 'resolved' : 'open'} /><div><div className="timeline-title"><strong>{incident.monitorName}</strong><span className={`pill ${incident.resolvedAt ? 'up' : 'down'}`}>{incident.resolvedAt ? 'resolved' : 'open'}</span></div><p>{incident.cause}</p><small>Started {date(incident.startedAt)}{incident.resolvedAt && ` · Resolved ${date(incident.resolvedAt)}`}</small></div></article>)}</div></section>
     </main>
     <footer>PulseOps · PostgreSQL-backed monitoring</footer>
   </div>

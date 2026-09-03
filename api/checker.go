@@ -237,7 +237,7 @@ func (a *app) deliverNotifications(ctx context.Context) {
 	if os.Getenv("BREVO_API_KEY") == "" || os.Getenv("ALERT_EMAIL_TO") == "" || os.Getenv("ALERT_EMAIL_FROM") == "" {
 		return
 	}
-	rows, err := a.db.Query(ctx, `SELECT id,subject,body,attempts FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() ORDER BY id LIMIT 10`)
+	rows, err := a.db.Query(ctx, `WITH due AS (SELECT id FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10) UPDATE notification_deliveries n SET attempts=n.attempts+1,next_attempt_at=now()+interval '5 minutes' FROM due WHERE n.id=due.id RETURNING n.id,n.subject,n.body,n.attempts`)
 	if err != nil {
 		log.Printf("notification queue: %v", err)
 		return
@@ -257,10 +257,10 @@ func (a *app) deliverNotifications(ctx context.Context) {
 	rows.Close()
 	for _, item := range items {
 		if err := sendBrevo(item.subject, item.body); err == nil {
-			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET delivered_at=now(),attempts=attempts+1 WHERE id=$1`, item.id)
+			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET delivered_at=now() WHERE id=$1`, item.id)
 		} else {
 			delay := 1 << min(item.attempts, 8)
-			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET attempts=attempts+1,next_attempt_at=now()+($2*interval '1 minute') WHERE id=$1`, item.id, delay)
+			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET next_attempt_at=now()+($2*interval '1 minute') WHERE id=$1`, item.id, delay)
 			log.Printf("Brevo delivery %d: %v", item.id, err)
 		}
 	}

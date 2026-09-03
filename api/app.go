@@ -63,6 +63,7 @@ func (a *app) routes() http.Handler {
 	mux.Handle("PUT /api/monitors/{id}", a.authorize(http.HandlerFunc(a.updateMonitor)))
 	mux.Handle("DELETE /api/monitors/{id}", a.authorize(http.HandlerFunc(a.deleteMonitor)))
 	mux.Handle("GET /api/monitors/{id}/checks", a.authorize(http.HandlerFunc(a.listChecks)))
+	mux.Handle("GET /api/incidents", a.authorize(http.HandlerFunc(a.listIncidents)))
 	return securityHeaders(mux)
 }
 
@@ -264,6 +265,36 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"checkedAt": at, "up": up, "statusCode": status, "responseMs": ms, "error": message, "certificateExpiresAt": cert})
+	}
+	if rows.Err() != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
+func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(r.Context(), `SELECT i.id,i.monitor_id,m.name,i.started_at,i.resolved_at,i.cause FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.started_at DESC LIMIT 100`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id, monitorID int64
+		var name, cause string
+		var started time.Time
+		var resolved *time.Time
+		if err := rows.Scan(&id, &monitorID, &name, &started, &resolved, &cause); err != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		items = append(items, map[string]any{"id": id, "monitorId": monitorID, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause})
+	}
+	if rows.Err() != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 	writeJSON(w, 200, items)
 }

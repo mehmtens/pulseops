@@ -19,7 +19,7 @@ PulseOps watches HTTP and HTTPS endpoints, records response time and uptime, ope
 ## What you get
 
 - **Reliable endpoint checks** — configurable 15-second to 24-hour intervals and hard request timeouts.
-- **Incident lifecycle** — a failure opens one incident; recovery resolves it transactionally.
+- **Incident lifecycle** — a failure opens one incident; recovery resolves it transactionally and keeps a dashboard timeline.
 - **Useful history** — response time, HTTP status, errors, 24-hour uptime, and 90-day check retention.
 - **SSL awareness** — certificate expiry capture and configurable early warning.
 - **Durable notifications** — PostgreSQL outbox with idempotency and retry backoff for Brevo email.
@@ -112,6 +112,7 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET/POST` | `/api/monitors` | Admin | List/create monitors |
 | `PUT/DELETE` | `/api/monitors/{id}` | Admin | Update/delete a monitor |
 | `GET` | `/api/monitors/{id}/checks` | Admin | Latest 100 checks |
+| `GET` | `/api/incidents` | Admin | Latest 100 incidents |
 
 ## Security model
 
