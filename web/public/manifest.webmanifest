@@ -1,0 +1,17 @@
+{
+  "name": "PulseOps Monitoring",
+  "short_name": "PulseOps",
+  "description": "Self-hosted uptime monitoring and incident response.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07100c",
+  "theme_color": "#07100c",
+  "icons": [
+    {
+      "src": "/pulseops-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
