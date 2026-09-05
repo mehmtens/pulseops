@@ -14,6 +14,7 @@
 - [x] Scoped API keys, incident acknowledgement/notes, 1–90 day uptime reports, and public incident history.
 - [x] Cron heartbeats, HTTP content assertions, and an embedded OpenAPI 3.1 contract.
 - [x] TCP port and DNS resolution monitors using the standard library.
+- [x] CSV uptime export and environment-configurable public status branding.
 
 ## Verification criteria met
 

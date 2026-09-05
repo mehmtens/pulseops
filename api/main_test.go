@@ -34,6 +34,17 @@ func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	}
 }
 
+func TestUptimeReportRejectsInvalidFormat(t *testing.T) {
+	app := newApp(nil, "0123456789abcdef")
+	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?format=pdf", nil)
+	request.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", response.Code)
+	}
+}
+
 func TestDecodeInput(t *testing.T) {
 	for name, body := range map[string]string{
 		"relative URL":   `{"name":"Site","url":"/health"}`,

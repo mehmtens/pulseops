@@ -99,6 +99,8 @@ docker compose down
 | `ALERT_EMAIL_FROM` | For email | empty | Verified Brevo sender |
 | `ALERT_WEBHOOK_URL` | For webhooks | empty | HTTP endpoint receiving PulseOps alert JSON |
 | `SSL_WARNING_DAYS` | No | `14` | Certificate warning threshold |
+| `STATUS_PAGE_NAME` | No | `PulseOps` | Public status page name |
+| `STATUS_PAGE_MESSAGE` | No | service-health message | Public status page message |
 
 For a public host, point DNS at the server and use ports 80/443:
 
@@ -127,7 +129,7 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET` | `/api/monitors/{id}/checks` | Admin | Latest 100 checks |
 | `GET` | `/api/incidents` | Admin | Latest 100 incidents |
 | `PATCH` | `/api/incidents/{id}` | Write | Acknowledge an incident and save an operator note |
-| `GET` | `/api/reports/uptime?days=30` | Read | Per-monitor uptime report for 1–90 days |
+| `GET` | `/api/reports/uptime?days=30` | Read | Per-monitor uptime report for 1–90 days; add `format=csv` to download |
 | `GET/POST` | `/api/keys` | Root token | List/create scoped API keys |
 | `DELETE` | `/api/keys/{id}` | Root token | Revoke an API key |
 

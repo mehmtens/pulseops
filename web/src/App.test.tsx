@@ -17,5 +17,6 @@ describe('App', () => {
     expect(screen.getByLabelText(/Maintenance until/)).toBeInTheDocument()
     expect(screen.getByLabelText('Monitor type')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'API keys' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Download CSV' })).toBeInTheDocument()
   })
 })

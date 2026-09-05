@@ -29,22 +29,23 @@ function PublicStatus() {
   const [monitors, setMonitors] = useState<Monitor[]>([])
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [updatedAt, setUpdatedAt] = useState('')
+  const [page, setPage] = useState({ name: 'PulseOps', message: 'Live service health and incident updates.' })
   const load = useCallback(async () => {
     const response = await fetch('/api/status')
     if (!response.ok) return
     const data = await response.json()
-    setMonitors(data.monitors); setIncidents(data.incidents || []); setUpdatedAt(data.updatedAt)
+    setMonitors(data.monitors); setIncidents(data.incidents || []); setUpdatedAt(data.updatedAt); if (data.page) setPage(data.page)
   }, [])
   useEffect(() => { load(); const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load])
   const operational = monitors.every((monitor) => stateOf(monitor) !== 'down')
   return <div className="shell status-page">
-    <header><a className="brand" href="/">Pulse<span>Ops</span></a><span className="live"><i /> Live</span></header>
+    <header><a className="brand" href="/">{page.name}</a><span className="live"><i /> Live</span></header>
     <main>
-      <section className={`hero-status ${operational ? 'healthy' : 'outage'}`}><div className="big-dot" /><div><p className="kicker">CURRENT STATUS</p><h1>{operational ? 'All systems operational' : 'Service disruption detected'}</h1><p>{updatedAt ? `Updated ${date(updatedAt)}` : 'Loading current status…'}</p></div></section>
+      <section className={`hero-status ${operational ? 'healthy' : 'outage'}`}><div className="big-dot" /><div><p className="kicker">CURRENT STATUS</p><h1>{operational ? 'All systems operational' : 'Service disruption detected'}</h1><p>{page.message} {updatedAt ? `Updated ${date(updatedAt)}` : 'Loading current status…'}</p></div></section>
       <div className="status-list">{monitors.length === 0 ? <div className="empty">No public services configured.</div> : monitors.map((monitor) => <article className="status-row" key={monitor.id}><div><h2>{monitor.name}</h2><p>{monitor.uptime24h.toFixed(2)}% uptime over 24 hours</p></div><span className={`pill ${stateOf(monitor)}`}>{stateOf(monitor)}</span></article>)}</div>
       <section className="incident-section"><div className="section-title"><div><p className="kicker">HISTORY</p><h2>Recent incidents</h2></div></div><div className="timeline">{incidents.length === 0 ? <div className="empty">No incidents reported.</div> : incidents.map((incident) => <article className="timeline-row" key={incident.id}><i className={incident.resolvedAt ? 'resolved' : 'open'} /><div><div className="timeline-title"><strong>{incident.monitorName}</strong><span className={`pill ${incident.resolvedAt ? 'up' : 'down'}`}>{incident.resolvedAt ? 'resolved' : 'investigating'}</span></div><p>{incident.cause}</p><small>{date(incident.startedAt)}{incident.resolvedAt && ` · Resolved ${date(incident.resolvedAt)}`}</small></div></article>)}</div></section>
     </main>
-    <footer>Powered by PulseOps</footer>
+    <footer>{page.name} · Powered by PulseOps</footer>
   </div>
 }
 
@@ -81,6 +82,7 @@ export function App() {
   async function annotate(incident: Incident) { const note = prompt('Incident note', incident.note || ''); if (note === null) return; try { await request(`/api/incidents/${incident.id}`, { method: 'PATCH', body: JSON.stringify({ acknowledged: true, note }) }); await load() } catch (err) { setError((err as Error).message) } }
   async function createKey(event: FormEvent) { event.preventDefault(); try { const result = await request('/api/keys', { method: 'POST', body: JSON.stringify(newKey) }); setCreatedToken(result.token); setNewKey({ name: '', scope: 'read' }); await load() } catch (err) { setError((err as Error).message) } }
   async function deleteKey(key: ApiKey) { if (!confirm(`Revoke ${key.name}?`)) return; try { await request(`/api/keys/${key.id}`, { method: 'DELETE' }); await load() } catch (err) { setError((err as Error).message) } }
+  async function downloadReport() { try { const response = await fetch('/api/reports/uptime?days=30&format=csv', { headers: { Authorization: `Bearer ${token}` } }); if (!response.ok) throw new Error('Download failed'); const href=URL.createObjectURL(await response.blob()); const link=document.createElement('a'); link.href=href; link.download='pulseops-uptime.csv'; link.click(); URL.revokeObjectURL(href) } catch (err) { setError((err as Error).message) } }
 
   if (!token) return <div className="login"><div className="login-card"><a className="brand" href="/">Pulse<span>Ops</span></a><p className="kicker">CONTROL ROOM</p><h1>See trouble before your users do.</h1><p>Enter the API token configured on your PulseOps server.</p><form onSubmit={login}><label>API token<input type="password" value={draftToken} onChange={(e) => setDraftToken(e.target.value)} autoComplete="current-password" required /></label>{error && <p className="error" role="alert">{error}</p>}<button>Open dashboard</button></form><a className="public-link" href="/status">View public status page →</a></div></div>
 
@@ -91,7 +93,7 @@ export function App() {
     <main>
       <div className="headline"><div><p className="kicker">CONTROL ROOM</p><h1>Good {new Date().getHours() < 12 ? 'morning' : 'evening'}.</h1><p>Everything that matters, in one quiet place.</p></div><div className={`overview ${down ? 'outage' : ''}`}><i />{down ? `${down} incident${down > 1 ? 's' : ''}` : 'All clear'}</div></div>
       <div className="metrics"><div><strong>{monitors.length}</strong><span>Monitors</span></div><div><strong>{average.toFixed(2)}%</strong><span>24h uptime</span></div><div><strong>{down}</strong><span>Open incidents</span></div></div>
-      {report && <section className="panel report"><div><p className="kicker">30 DAY REPORT</p><h2>Service reliability</h2></div><div className="report-grid">{report.monitors.map((item) => <div key={item.monitorId}><strong>{item.uptime.toFixed(2)}%</strong><span>{item.monitorName} · {item.averageResponseMs} ms · {item.checks} checks</span></div>)}</div></section>}
+      {report && <section className="panel report"><div className="section-title"><div><p className="kicker">30 DAY REPORT</p><h2>Service reliability</h2></div><button className="secondary" onClick={downloadReport}>Download CSV</button></div><div className="report-grid">{report.monitors.map((item) => <div key={item.monitorId}><strong>{item.uptime.toFixed(2)}%</strong><span>{item.monitorName} · {item.averageResponseMs} ms · {item.checks} checks</span></div>)}</div></section>}
       <section className="panel form-panel"><div><p className="kicker">{editing ? 'EDIT MONITOR' : 'NEW MONITOR'}</p><h2>{editing ? 'Update endpoint' : 'Watch an endpoint'}</h2></div><form onSubmit={save}>
         <label>Name<input value={form.name} maxLength={100} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Marketing site" required /></label>
         <label>Monitor type<select value={form.monitorType} disabled={editing !== null} onChange={(e) => setForm({ ...form, monitorType: e.target.value as MonitorForm['monitorType'] })}><option value="http">HTTP / HTTPS</option><option value="heartbeat">Cron heartbeat</option><option value="tcp">TCP port</option><option value="dns">DNS lookup</option></select></label>

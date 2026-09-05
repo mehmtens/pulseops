@@ -24,6 +24,8 @@ services:
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
       SSL_WARNING_DAYS: ${SSL_WARNING_DAYS:-14}
+      STATUS_PAGE_NAME: ${STATUS_PAGE_NAME:-PulseOps}
+      STATUS_PAGE_MESSAGE: ${STATUS_PAGE_MESSAGE:-Live service health and incident updates.}
     depends_on:
       postgres:
         condition: service_healthy

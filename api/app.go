@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -220,7 +221,7 @@ func (a *app) publicStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database error")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"updatedAt": time.Now().UTC(), "monitors": items, "incidents": incidents})
+	writeJSON(w, 200, map[string]any{"updatedAt": time.Now().UTC(), "monitors": items, "incidents": incidents, "page": map[string]string{"name": env("STATUS_PAGE_NAME", "PulseOps"), "message": env("STATUS_PAGE_MESSAGE", "Live service health and incident updates.")}})
 }
 
 func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
@@ -480,22 +481,43 @@ func (a *app) uptimeReport(w http.ResponseWriter, r *http.Request) {
 		}
 		days = parsed
 	}
+	format := r.URL.Query().Get("format")
+	if format != "" && format != "json" && format != "csv" {
+		writeError(w, 400, "format must be json or csv")
+		return
+	}
 	rows, err := a.db.Query(r.Context(), `SELECT m.id,m.name,COALESCE(100.0*count(c.id) FILTER (WHERE c.up)/NULLIF(count(c.id),0),100),COALESCE(avg(c.response_ms),0)::integer,count(c.id) FROM monitors m LEFT JOIN checks c ON c.monitor_id=m.id AND c.checked_at>now()-($1*interval '1 day') GROUP BY m.id,m.name ORDER BY m.name`, days)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
 	defer rows.Close()
-	items := []map[string]any{}
+	type reportRow struct {
+		MonitorID         int64   `json:"monitorId"`
+		MonitorName       string  `json:"monitorName"`
+		Uptime            float64 `json:"uptime"`
+		AverageResponseMS int64   `json:"averageResponseMs"`
+		Checks            int64   `json:"checks"`
+	}
+	items := []reportRow{}
 	for rows.Next() {
-		var id, average, checks int64
-		var name string
-		var uptime float64
-		if rows.Scan(&id, &name, &uptime, &average, &checks) != nil {
+		var item reportRow
+		if rows.Scan(&item.MonitorID, &item.MonitorName, &item.Uptime, &item.AverageResponseMS, &item.Checks) != nil {
 			writeError(w, 500, "database error")
 			return
 		}
-		items = append(items, map[string]any{"monitorId": id, "monitorName": name, "uptime": uptime, "averageResponseMs": average, "checks": checks})
+		items = append(items, item)
+	}
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="pulseops-uptime.csv"`)
+		writer := csv.NewWriter(w)
+		_ = writer.Write([]string{"monitor", "uptime_percent", "average_response_ms", "checks"})
+		for _, item := range items {
+			_ = writer.Write([]string{item.MonitorName, strconv.FormatFloat(item.Uptime, 'f', 2, 64), strconv.FormatInt(item.AverageResponseMS, 10), strconv.FormatInt(item.Checks, 10)})
+		}
+		writer.Flush()
+		return
 	}
 	writeJSON(w, 200, map[string]any{"days": days, "generatedAt": time.Now().UTC(), "monitors": items})
 }
