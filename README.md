@@ -142,6 +142,7 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `DELETE` | `/api/keys/{id}` | Admin | Revoke an access key |
 | `GET/PUT` | `/api/organization` | Member/Admin | Read or rename the organization |
 | `GET` | `/api/audit` | Admin | Recent successful changes |
+| `GET` | `/api/notifications/metrics` | Member | Notification queue health |
 
 For a heartbeat monitor, send a request after the job succeeds:
 

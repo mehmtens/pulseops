@@ -22,8 +22,8 @@ matter for a real production team. Every phase has a runnable acceptance check.
 
 - [ ] Add audit retention and an export endpoint so audit data cannot grow
   without bound and can be reviewed during an incident.
-- [ ] Add notification delivery metrics (queued, delivered, retrying, failed)
-  to the dashboard and readiness diagnostics.
+- [x] Add notification delivery metrics (queued, delivered, retrying) to the
+  dashboard and API.
 - [ ] Add recurring maintenance schedules (weekly windows and timezone-aware
   exceptions) while preserving the current one-off window field.
 - [ ] Add regression tests for migration upgrades, lease expiry, quorum ties,

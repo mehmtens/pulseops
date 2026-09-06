@@ -38,6 +38,7 @@
     "/api/organization": { "get": { "summary": "Get organization profile", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Organization profile" } } }, "put": { "summary": "Update organization profile (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Updated organization profile" } } } },
     "/api/worker/claim": { "post": { "summary": "Lease a due check to a regional worker", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Leased check" }, "204": { "description": "No work due" } } } },
     "/api/worker/results/{id}": { "post": { "summary": "Submit a leased regional check result", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Result recorded" }, "409": { "description": "Lease expired or consumed" } } } }
-    ,"/api/audit": { "get": { "summary": "List recent successful mutations (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Audit event list" } } } }
+    ,"/api/audit": { "get": { "summary": "List recent successful mutations (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Audit event list" } } } },
+    "/api/notifications/metrics": { "get": { "summary": "Read notification delivery metrics", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Delivery queue metrics" } } } }
   }
 }

@@ -12,6 +12,7 @@ type Incident = { id: number; monitorName: string; startedAt: string; resolvedAt
 type ApiKey = { id: number; name: string; prefix: string; scope: 'read' | 'write' | 'admin'; lastUsedAt: string | null; createdAt: string }
 type Report = { days: number; monitors: { monitorId: number; monitorName: string; uptime: number; averageResponseMs: number; checks: number }[] }
 type AuditEvent = { actor: string; action: string; resource: string; status: number; createdAt: string }
+type NotificationMetrics = { total: number; delivered: number; pending: number; retrying: number; oldestPendingAt: string | null; channels: Record<string, { total: number; delivered: number }> }
 const blank: MonitorForm = { name: '', monitorType: 'http', url: '', expectedKeyword: '', intervalSeconds: 60, timeoutSeconds: 10, failureThreshold: 2, recoveryThreshold: 2, maintenanceUntil: '', active: true, public: true }
 
 function stateOf(monitor: Monitor) {
@@ -59,6 +60,7 @@ export function App() {
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [report, setReport] = useState<Report | null>(null)
   const [audit, setAudit] = useState<AuditEvent[]>([])
+  const [notificationMetrics, setNotificationMetrics] = useState<NotificationMetrics | null>(null)
   const [newKey, setNewKey] = useState({ name: '', scope: 'read' as 'read' | 'write' | 'admin' })
   const [createdToken, setCreatedToken] = useState('')
   const [heartbeatUrl, setHeartbeatUrl] = useState('')
@@ -73,7 +75,7 @@ export function App() {
     if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error || 'Request failed') }
     return response.status === 204 ? null : response.json()
   }, [token])
-  const load = useCallback(async () => { if (!token) return; try { const [nextMonitors, nextIncidents, nextReport] = await Promise.all([request('/api/monitors'), request('/api/incidents'), request('/api/reports/uptime?days=30')]); setMonitors(nextMonitors); setIncidents(nextIncidents); setReport(nextReport); setError(''); try { setKeys(await request('/api/keys')) } catch { setKeys([]) } try { setAudit(await request('/api/audit')) } catch { setAudit([]) } } catch (err) { setError((err as Error).message) } }, [request, token])
+  const load = useCallback(async () => { if (!token) return; try { const [nextMonitors, nextIncidents, nextReport] = await Promise.all([request('/api/monitors'), request('/api/incidents'), request('/api/reports/uptime?days=30')]); setMonitors(nextMonitors); setIncidents(nextIncidents); setReport(nextReport); setError(''); try { setKeys(await request('/api/keys')) } catch { setKeys([]) } try { setAudit(await request('/api/audit')) } catch { setAudit([]) } try { setNotificationMetrics(await request('/api/notifications/metrics')) } catch { setNotificationMetrics(null) } } catch (err) { setError((err as Error).message) } }, [request, token])
   useEffect(() => { load() }, [load])
   useEffect(() => { if (!token) return; const events = new EventSource('/api/events'); events.addEventListener('status', load); return () => events.close() }, [load, token])
 
@@ -96,6 +98,7 @@ export function App() {
       <div className="headline"><div><p className="kicker">CONTROL ROOM</p><h1>Good {new Date().getHours() < 12 ? 'morning' : 'evening'}.</h1><p>Everything that matters, in one quiet place.</p></div><div className={`overview ${down ? 'outage' : ''}`}><i />{down ? `${down} incident${down > 1 ? 's' : ''}` : 'All clear'}</div></div>
       <div className="metrics"><div><strong>{monitors.length}</strong><span>Monitors</span></div><div><strong>{average.toFixed(2)}%</strong><span>24h uptime</span></div><div><strong>{down}</strong><span>Open incidents</span></div></div>
       {report && <section className="panel report"><div className="section-title"><div><p className="kicker">30 DAY REPORT</p><h2>Service reliability</h2></div><button className="secondary" onClick={downloadReport}>Download CSV</button></div><div className="report-grid">{report.monitors.map((item) => <div key={item.monitorId}><strong>{item.uptime.toFixed(2)}%</strong><span>{item.monitorName} · {item.averageResponseMs} ms · {item.checks} checks</span></div>)}</div></section>}
+      {notificationMetrics && <section className="panel delivery"><div className="section-title"><div><p className="kicker">ALERT DELIVERY</p><h2>Notification queue</h2></div><span className={`delivery-state ${notificationMetrics.retrying ? 'attention' : ''}`}>{notificationMetrics.retrying ? 'Needs attention' : 'Healthy'}</span></div><div className="delivery-grid"><div><strong>{notificationMetrics.delivered}</strong><span>Delivered</span></div><div><strong>{notificationMetrics.pending}</strong><span>Waiting</span></div><div><strong>{notificationMetrics.retrying}</strong><span>Retrying</span></div><div><strong>{notificationMetrics.total}</strong><span>Total events</span></div></div>{notificationMetrics.oldestPendingAt && <p className="delivery-note">Oldest pending attempt: {date(notificationMetrics.oldestPendingAt)}</p>}</section>}
       <section className="panel form-panel"><div><p className="kicker">{editing ? 'EDIT MONITOR' : 'NEW MONITOR'}</p><h2>{editing ? 'Update endpoint' : 'Watch an endpoint'}</h2></div><form onSubmit={save}>
         <label>Name<input value={form.name} maxLength={100} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Marketing site" required /></label>
         <label>Monitor type<select value={form.monitorType} disabled={editing !== null} onChange={(e) => setForm({ ...form, monitorType: e.target.value as MonitorForm['monitorType'] })}><option value="http">HTTP / HTTPS</option><option value="heartbeat">Cron heartbeat</option><option value="tcp">TCP port</option><option value="dns">DNS lookup</option></select></label>

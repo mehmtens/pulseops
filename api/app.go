@@ -111,6 +111,7 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /api/organization", a.authorize(http.HandlerFunc(a.getOrganization)))
 	mux.Handle("PUT /api/organization", a.authorizeAdmin(http.HandlerFunc(a.updateOrganization)))
 	mux.Handle("GET /api/audit", a.authorizeAdmin(http.HandlerFunc(a.listAudit)))
+	mux.Handle("GET /api/notifications/metrics", a.authorize(http.HandlerFunc(a.notificationMetrics)))
 	return securityHeaders(mux)
 }
 
@@ -667,6 +668,37 @@ func (a *app) listAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, items)
+}
+
+func (a *app) notificationMetrics(w http.ResponseWriter, r *http.Request) {
+	var total, delivered, pending, retrying int
+	var oldest *time.Time
+	err := a.db.QueryRow(r.Context(), `SELECT count(*),count(*) FILTER (WHERE delivered_at IS NOT NULL),count(*) FILTER (WHERE delivered_at IS NULL AND attempts=0),count(*) FILTER (WHERE delivered_at IS NULL AND attempts>0),min(next_attempt_at) FILTER (WHERE delivered_at IS NULL) FROM notification_deliveries`).Scan(&total, &delivered, &pending, &retrying, &oldest)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	rows, err := a.db.Query(r.Context(), `SELECT channel,count(*),count(*) FILTER (WHERE delivered_at IS NOT NULL) FROM notification_deliveries GROUP BY channel ORDER BY channel`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	channels := map[string]map[string]int{}
+	for rows.Next() {
+		var channel string
+		var channelTotal, channelDelivered int
+		if rows.Scan(&channel, &channelTotal, &channelDelivered) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		channels[channel] = map[string]int{"total": channelTotal, "delivered": channelDelivered}
+	}
+	if rows.Err() != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"total": total, "delivered": delivered, "pending": pending, "retrying": retrying, "oldestPendingAt": oldest, "channels": channels})
 }
 func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
 	id, err := monitorID(r)
