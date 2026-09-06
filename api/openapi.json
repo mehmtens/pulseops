@@ -34,6 +34,7 @@
     },
     "/api/incidents": { "get": { "summary": "List incidents", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Incident list" } } } },
     "/api/reports/uptime": { "get": { "summary": "Generate a 1–90 day uptime report", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Uptime report" } } } },
-    "/api/keys": { "get": { "summary": "List API keys", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "API key list" } } }, "post": { "summary": "Create an API key", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Key and one-time secret" } } } }
+    "/api/keys": { "get": { "summary": "List team access keys (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Access key list" } } }, "post": { "summary": "Create a viewer, operator, or admin access key", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Key and one-time secret" } } } },
+    "/api/organization": { "get": { "summary": "Get organization profile", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Organization profile" } } }, "put": { "summary": "Update organization profile (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Updated organization profile" } } } }
   }
 }

@@ -23,6 +23,15 @@ func TestHealthAndAuth(t *testing.T) {
 	}
 }
 
+func TestRolePermissions(t *testing.T) {
+	if roleAllows("read", true, false) || roleAllows("write", false, true) {
+		t.Fatal("limited roles gained elevated access")
+	}
+	if !roleAllows("read", false, false) || !roleAllows("write", true, false) || !roleAllows("admin", true, true) {
+		t.Fatal("valid role was denied")
+	}
+}
+
 func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	app := newApp(nil, "0123456789abcdef")
 	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?days=365", nil)

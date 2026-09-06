@@ -85,9 +85,11 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /api/incidents", a.authorize(http.HandlerFunc(a.listIncidents)))
 	mux.Handle("PATCH /api/incidents/{id}", a.authorizeWrite(http.HandlerFunc(a.updateIncident)))
 	mux.Handle("GET /api/reports/uptime", a.authorize(http.HandlerFunc(a.uptimeReport)))
-	mux.Handle("GET /api/keys", a.authorizeRoot(http.HandlerFunc(a.listKeys)))
-	mux.Handle("POST /api/keys", a.authorizeRoot(http.HandlerFunc(a.createKey)))
-	mux.Handle("DELETE /api/keys/{id}", a.authorizeRoot(http.HandlerFunc(a.deleteKey)))
+	mux.Handle("GET /api/keys", a.authorizeAdmin(http.HandlerFunc(a.listKeys)))
+	mux.Handle("POST /api/keys", a.authorizeAdmin(http.HandlerFunc(a.createKey)))
+	mux.Handle("DELETE /api/keys/{id}", a.authorizeAdmin(http.HandlerFunc(a.deleteKey)))
+	mux.Handle("GET /api/organization", a.authorize(http.HandlerFunc(a.getOrganization)))
+	mux.Handle("PUT /api/organization", a.authorizeAdmin(http.HandlerFunc(a.updateOrganization)))
 	return securityHeaders(mux)
 }
 
@@ -105,25 +107,19 @@ func (a *app) authorize(next http.Handler) http.Handler {
 func (a *app) authorizeWrite(next http.Handler) http.Handler {
 	return a.authorizeScope(true, next)
 }
-func (a *app) authorizeRoot(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if len(provided) == len(a.token) && subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) == 1 {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if a.db != nil && strings.HasPrefix(provided, "po_") {
-			hash := sha256.Sum256([]byte(provided))
-			var exists bool
-			if a.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM api_keys WHERE token_hash=$1)`, hash[:]).Scan(&exists) == nil && exists {
-				writeError(w, 403, "root token required")
-				return
-			}
-		}
-		writeError(w, 401, "unauthorized")
-	})
+func roleAllows(scope string, write, admin bool) bool {
+	if admin {
+		return scope == "admin"
+	}
+	return !write || scope == "write" || scope == "admin"
+}
+func (a *app) authorizeAdmin(next http.Handler) http.Handler {
+	return a.authorizeRole(false, true, next)
 }
 func (a *app) authorizeScope(write bool, next http.Handler) http.Handler {
+	return a.authorizeRole(write, false, next)
+}
+func (a *app) authorizeRole(write, admin bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if len(provided) == len(a.token) && subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) == 1 {
@@ -140,8 +136,8 @@ func (a *app) authorizeScope(write bool, next http.Handler) http.Handler {
 			writeError(w, 401, "unauthorized")
 			return
 		}
-		if write && scope != "write" {
-			writeError(w, 403, "write scope required")
+		if !roleAllows(scope, write, admin) {
+			writeError(w, 403, "insufficient role")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -555,7 +551,7 @@ func (a *app) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name = strings.TrimSpace(in.Name)
-	if len(in.Name) < 1 || len(in.Name) > 100 || (in.Scope != "read" && in.Scope != "write") {
+	if len(in.Name) < 1 || len(in.Name) > 100 || (in.Scope != "read" && in.Scope != "write" && in.Scope != "admin") {
 		writeError(w, 400, "name and scope are invalid")
 		return
 	}
@@ -568,11 +564,45 @@ func (a *app) createKey(w http.ResponseWriter, r *http.Request) {
 	hash := sha256.Sum256([]byte(token))
 	prefix := token[:11]
 	var id int64
-	if err := a.db.QueryRow(r.Context(), `INSERT INTO api_keys(name,token_hash,token_prefix,scope) VALUES($1,$2,$3,$4) RETURNING id`, in.Name, hash[:], prefix, in.Scope).Scan(&id); err != nil {
+	if err := a.db.QueryRow(r.Context(), `INSERT INTO api_keys(name,token_hash,token_prefix,scope,organization_id) VALUES($1,$2,$3,$4,(SELECT id FROM organizations ORDER BY id LIMIT 1)) RETURNING id`, in.Name, hash[:], prefix, in.Scope).Scan(&id); err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "scope": in.Scope, "prefix": prefix, "token": token})
+}
+
+func (a *app) getOrganization(w http.ResponseWriter, r *http.Request) {
+	var id int64
+	var name string
+	var created time.Time
+	if err := a.db.QueryRow(r.Context(), `SELECT id,name,created_at FROM organizations ORDER BY id LIMIT 1`).Scan(&id, &name, &created); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": id, "name": name, "createdAt": created})
+}
+
+func (a *app) updateOrganization(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if len(in.Name) < 1 || len(in.Name) > 100 {
+		writeError(w, 400, "name is invalid")
+		return
+	}
+	var id int64
+	if err := a.db.QueryRow(r.Context(), `UPDATE organizations SET name=$1 WHERE id=(SELECT id FROM organizations ORDER BY id LIMIT 1) RETURNING id`, in.Name).Scan(&id); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": id, "name": in.Name})
 }
 func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
 	id, err := monitorID(r)

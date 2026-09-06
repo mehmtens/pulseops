@@ -33,7 +33,7 @@ PulseOps watches HTTP and HTTPS endpoints and cron heartbeats, records response 
 - **Public status page** — only monitors explicitly marked public are exposed at `/status`.
 - **Operational follow-through** — acknowledge incidents, attach operator notes, and publish recent public incident history.
 - **30-day reporting** — inspect per-monitor uptime, average response time, and check volume for any 1–90 day window.
-- **Scoped API keys** — create revocable read-only or read/write integration keys; secrets are stored as SHA-256 hashes and shown once.
+- **Team roles** — issue revocable viewer, operator, or admin access keys; secrets are stored as SHA-256 hashes and shown once.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
 - **OpenAPI contract** — the machine-readable API description is served at `/api/openapi.json`.
 
@@ -130,8 +130,9 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET` | `/api/incidents` | Admin | Latest 100 incidents |
 | `PATCH` | `/api/incidents/{id}` | Write | Acknowledge an incident and save an operator note |
 | `GET` | `/api/reports/uptime?days=30` | Read | Per-monitor uptime report for 1–90 days; add `format=csv` to download |
-| `GET/POST` | `/api/keys` | Root token | List/create scoped API keys |
-| `DELETE` | `/api/keys/{id}` | Root token | Revoke an API key |
+| `GET/POST` | `/api/keys` | Admin | List/create team access keys |
+| `DELETE` | `/api/keys/{id}` | Admin | Revoke an access key |
+| `GET/PUT` | `/api/organization` | Member/Admin | Read or rename the organization |
 
 For a heartbeat monitor, send a request after the job succeeds:
 
@@ -143,9 +144,9 @@ The heartbeat URL is displayed only when the monitor is created. Store it like a
 
 ## Security model
 
-PulseOps is designed for a trusted single-operator deployment. The server-configured root token manages API keys. Integration keys can be read-only or read/write, are stored only as hashes, and can be revoked independently. Public APIs expose only monitor health and incidents for monitors marked `public`, never credentials or notification settings. Endpoint validation rejects credentials in URLs, private/loopback/link-local targets, DNS resolutions to private networks, redirects beyond five hops, and TLS below 1.2.
+PulseOps supports a team organization with three enforced roles: viewers can inspect operations, operators can also manage monitors and incidents, and admins can manage team access and the organization profile. The server-configured root token remains the recovery credential. Access keys are stored only as hashes and can be revoked independently. Public APIs expose only monitor health and incidents for monitors marked `public`, never credentials or notification settings. Endpoint validation rejects credentials in URLs, private/loopback/link-local targets, DNS resolutions to private networks, redirects beyond five hops, and TLS below 1.2.
 
-Put internet-facing installations behind HTTPS, use unique secrets, restrict host access, and keep Docker/PostgreSQL patched. PulseOps intentionally does not provide multi-user accounts or organization-level authorization.
+Put internet-facing installations behind HTTPS, use unique secrets, restrict host access, and keep Docker/PostgreSQL patched. Access is token-based; browser password login, SSO, and cross-organization tenant isolation are not part of this deployment model.
 
 ## Operations
 
