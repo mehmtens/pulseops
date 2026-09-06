@@ -54,6 +54,9 @@ func (a *app) runScheduler(ctx context.Context) {
 					if _, err := a.db.Exec(ctx, `DELETE FROM checks WHERE checked_at < now()-interval '90 days'`); err != nil {
 						log.Printf("retention cleanup: %v", err)
 					}
+					if _, err := a.db.Exec(ctx, `DELETE FROM audit_events WHERE created_at < now()-($1*interval '1 day')`, auditRetentionDays()); err != nil {
+						log.Printf("audit retention cleanup: %v", err)
+					}
 				}()
 			}
 			if time.Since(lastNotifications) >= 5*time.Second {
@@ -80,6 +83,14 @@ func (a *app) runScheduler(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func auditRetentionDays() int {
+	days, err := strconv.Atoi(env("AUDIT_RETENTION_DAYS", "365"))
+	if err != nil || days < 30 || days > 3650 {
+		return 365
+	}
+	return days
 }
 
 func (a *app) claimDue(ctx context.Context) ([]dueMonitor, error) {

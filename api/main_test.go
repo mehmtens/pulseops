@@ -65,6 +65,17 @@ func TestAuditResponseWriterDefaultsStatus(t *testing.T) {
 	}
 }
 
+func TestAuditRetentionDays(t *testing.T) {
+	t.Setenv("AUDIT_RETENTION_DAYS", "90")
+	if auditRetentionDays() != 90 {
+		t.Fatal("configured retention was ignored")
+	}
+	t.Setenv("AUDIT_RETENTION_DAYS", "2")
+	if auditRetentionDays() != 365 {
+		t.Fatal("unsafe retention was accepted")
+	}
+}
+
 func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	app := newApp(nil, "0123456789abcdef")
 	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?days=365", nil)

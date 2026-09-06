@@ -103,6 +103,12 @@ docker compose down
 | `SSL_WARNING_DAYS` | No | `14` | Certificate warning threshold |
 | `STATUS_PAGE_NAME` | No | `PulseOps` | Public status page name |
 | `STATUS_PAGE_MESSAGE` | No | service-health message | Public status page message |
+| `PULSEOPS_WORKER_TOKEN` | For workers | empty | Shared 32+ character secret for regional workers |
+| `PULSEOPS_WORKER_REGION` | For workers | `local` | Lowercase worker region label |
+| `PULSEOPS_COORDINATOR_URL` | For workers | empty | Coordinator URL; setting it runs this image as a worker |
+| `PULSEOPS_LOCAL_CHECKS` | No | `true` | Set `false` on a coordinator using only remote workers |
+| `PULSEOPS_REGION_QUORUM` | No | `1` | Distinct regional votes required before health changes |
+| `AUDIT_RETENTION_DAYS` | No | `365` | Successful audit events retained (30–3650 days) |
 
 For a public host, point DNS at the server and use ports 80/443:
 
@@ -226,7 +232,7 @@ CI runs the same backend tests, frontend tests, and production build on every pu
 
 ## Delivery status
 
-The MVP is complete: HTTP/content and heartbeat monitoring, incidents, scoped API access, reliability reporting, SSL/Brevo/webhook notifications, live dashboard, public incident history, OpenAPI documentation, and production hardening are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the verification criteria and sensible post-MVP options.
+The core platform is production-shaped: monitoring, incidents, team roles, regional workers, quorum decisions, audit history, reporting, notifications, and a mobile PWA are implemented and container-verified. See [the roadmap](docs/roadmap.md) for the next hardening milestones.
 
 ---
 

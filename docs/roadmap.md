@@ -1,37 +1,63 @@
-# PulseOps roadmap
+# PulseOps development roadmap
 
-## Completed MVP
+This roadmap keeps PulseOps small enough to operate while closing the gaps that
+matter for a real production team. Every phase has a runnable acceptance check.
 
-- [x] Go API, React + TypeScript, PostgreSQL, Caddy, Docker Compose, CI, and health/readiness checks.
-- [x] Validated monitor CRUD with protected administrative endpoints.
-- [x] PostgreSQL-backed scheduling and multi-instance-safe due-check claims.
-- [x] Response history, 24-hour uptime, and automatic incident open/resolve behavior.
-- [x] SSL certificate expiry tracking and warning events.
-- [x] Durable, idempotent Brevo notification outbox with retry backoff.
-- [x] Server-Sent Events dashboard refresh and public status page.
-- [x] Embedded, locked migrations; SSRF controls; security headers; graceful shutdown; retention; backup/restore guidance.
-- [x] Flapping thresholds, maintenance windows, generic webhook alerts, and channel-isolated delivery leases.
-- [x] Scoped API keys, incident acknowledgement/notes, 1–90 day uptime reports, and public incident history.
-- [x] Cron heartbeats, HTTP content assertions, and an embedded OpenAPI 3.1 contract.
-- [x] TCP port and DNS resolution monitors using the standard library.
-- [x] CSV uptime export and environment-configurable public status branding.
+## Shipped
 
-## Verification criteria met
+- [x] HTTP/HTTPS, content, TCP, DNS, and cron-heartbeat monitors.
+- [x] PostgreSQL scheduling, safe leases, incident lifecycle, flapping controls,
+  maintenance windows, response history, 90-day retention, and CSV reports.
+- [x] Brevo email and generic webhook notifications with durable retries.
+- [x] Public status page, incident timeline, branding, SSE refresh, OpenAPI 3.1,
+  Docker Compose, health/readiness checks, and CI.
+- [x] Installable mobile PWA with offline shell and application metadata.
+- [x] Viewer/operator/admin team roles, organization profile, and revocable keys.
+- [x] Regional workers with signed bearer access, one-time leases, region-tagged
+  checks, and configurable multi-region quorum.
+- [x] Admin audit trail for successful monitor, incident, key, and organization
+  mutations.
 
-1. Backend unit tests pass.
-2. Frontend test and production TypeScript build pass.
-3. Fresh Docker Compose stack reaches healthy PostgreSQL and ready API.
-4. Real HTTPS monitor records HTTP status, response time, uptime, and certificate expiry.
-5. A failing response opens an incident and a healthy response resolves it.
-6. Unauthorized administration returns HTTP 401; public status contains only public monitors.
+## Phase 1 — harden the current platform (next)
 
-## Post-MVP options
+- [ ] Add audit retention and an export endpoint so audit data cannot grow
+  without bound and can be reviewed during an incident.
+- [ ] Add notification delivery metrics (queued, delivered, retrying, failed)
+  to the dashboard and readiness diagnostics.
+- [ ] Add recurring maintenance schedules (weekly windows and timezone-aware
+  exceptions) while preserving the current one-off window field.
+- [ ] Add regression tests for migration upgrades, lease expiry, quorum ties,
+  and notification retry behavior.
 
-Only add these when a real deployment needs them:
+Acceptance: a fresh Compose deployment reaches migration head, audit export is
+bounded, and the full Go/frontend test suites pass in CI.
 
-- Multi-user accounts, organizations, and role-based access.
-- First-party notification adapters such as Slack, Telegram, or PagerDuty when generic webhooks are insufficient.
-- Regional checker workers and geographic consensus.
-- Recurring maintenance schedules.
-- Long-term rollups beyond the built-in 90-day raw-check retention when raw-query performance becomes measurable.
-- OpenTelemetry export and deployment-specific dashboards.
+## Phase 2 — team operations
+
+- [ ] Add invitations and expiring member access links on top of the existing
+  token roles.
+- [ ] Add per-monitor notification policies and escalation delays.
+- [ ] Add status-page incident updates and component grouping.
+- [ ] Add optional Web Push notifications for the existing PWA.
+
+Acceptance: two operators can work on different monitors, receive only the
+configured alerts, and revoke access without restarting the service.
+
+## Phase 3 — scale when measured
+
+- [ ] Add long-term daily/monthly rollups when raw-check queries become slow.
+- [ ] Add worker health/heartbeat visibility and region availability warnings.
+- [ ] Add OpenTelemetry traces and deployment-specific dashboards.
+- [ ] Add queue or Redis only if PostgreSQL lease throughput is demonstrated to
+  be the bottleneck.
+
+Acceptance: load tests document the monitor count, check rate, and recovery
+behavior supported by one coordinator and a worker fleet.
+
+## Deliberately deferred
+
+- Native iOS/Android apps, ICMP checks, browser multi-step journeys, and SSO.
+- Full cross-tenant isolation and enterprise billing.
+
+These are intentionally deferred until a deployment or customer requires the
+additional operational surface.
