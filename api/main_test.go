@@ -45,6 +45,18 @@ func TestWorkerRegionValidation(t *testing.T) {
 	}
 }
 
+func TestQuorumDecision(t *testing.T) {
+	if _, decided := quorumDecision(1, 1, 2); decided {
+		t.Fatal("split regions must not decide")
+	}
+	if up, decided := quorumDecision(2, 1, 2); !decided || !up {
+		t.Fatal("two healthy regions must recover")
+	}
+	if up, decided := quorumDecision(0, 2, 2); !decided || up {
+		t.Fatal("two failed regions must fail")
+	}
+}
+
 func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	app := newApp(nil, "0123456789abcdef")
 	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?days=365", nil)

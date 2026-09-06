@@ -25,6 +25,7 @@ type workerJob struct {
 	MonitorType       string `json:"monitorType"`
 	ExpectedKeyword   string `json:"expectedKeyword"`
 	TimeoutSeconds    int    `json:"timeoutSeconds"`
+	IntervalSeconds   int    `json:"intervalSeconds"`
 	FailureThreshold  int    `json:"failureThreshold"`
 	RecoveryThreshold int    `json:"recoveryThreshold"`
 	Maintenance       bool   `json:"maintenance"`
@@ -78,11 +79,17 @@ func (a *app) claimWorkerJob(w http.ResponseWriter, r *http.Request) {
 	lease := "wl_" + hex.EncodeToString(secret)
 	hash := sha256.Sum256([]byte(lease))
 	var job workerJob
-	err := a.db.QueryRow(r.Context(), `WITH due AS (
-		SELECT id FROM monitors WHERE active AND monitor_type<>'heartbeat' AND next_check_at<=now()
-		AND (worker_lease_until IS NULL OR worker_lease_until<now()) ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 1
-	) UPDATE monitors m SET next_check_at=now()+(interval_seconds*interval '1 second'),worker_lease_hash=$1,worker_lease_until=now()+interval '2 minutes'
-	FROM due WHERE m.id=due.id RETURNING m.id,m.name,m.url,m.monitor_type,m.expected_keyword,m.timeout_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now()`, hash[:]).Scan(&job.ID, &job.Name, &job.URL, &job.MonitorType, &job.ExpectedKeyword, &job.TimeoutSeconds, &job.FailureThreshold, &job.RecoveryThreshold, &job.Maintenance)
+	err := a.db.QueryRow(r.Context(), `WITH candidate AS (
+		SELECT m.id FROM monitors m LEFT JOIN worker_leases l ON l.monitor_id=m.id AND l.region=$2
+		WHERE m.active AND m.monitor_type<>'heartbeat' AND COALESCE(l.next_check_at,'-infinity')<=now()
+		AND (l.lease_until IS NULL OR l.lease_until<now()) ORDER BY COALESCE(l.next_check_at,'-infinity') FOR UPDATE OF m SKIP LOCKED LIMIT 1
+	), leased AS (
+		INSERT INTO worker_leases(monitor_id,region,next_check_at,lease_hash,lease_until)
+		SELECT m.id,$2,now()+(m.interval_seconds*interval '1 second'),$1,now()+interval '2 minutes' FROM monitors m JOIN candidate c ON c.id=m.id
+		ON CONFLICT (monitor_id,region) DO UPDATE SET next_check_at=EXCLUDED.next_check_at,lease_hash=EXCLUDED.lease_hash,lease_until=EXCLUDED.lease_until
+		WHERE worker_leases.lease_until IS NULL OR worker_leases.lease_until<now() RETURNING monitor_id
+	) SELECT m.id,m.name,m.url,m.monitor_type,m.expected_keyword,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now()
+	FROM monitors m JOIN leased l ON l.monitor_id=m.id`, hash[:], region).Scan(&job.ID, &job.Name, &job.URL, &job.MonitorType, &job.ExpectedKeyword, &job.TimeoutSeconds, &job.IntervalSeconds, &job.FailureThreshold, &job.RecoveryThreshold, &job.Maintenance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		w.WriteHeader(204)
 		return
@@ -115,7 +122,10 @@ func (a *app) submitWorkerResult(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := sha256.Sum256([]byte(result.Lease))
 	var item dueMonitor
-	err = a.db.QueryRow(r.Context(), `UPDATE monitors SET worker_lease_hash=NULL,worker_lease_until=NULL WHERE id=$1 AND worker_lease_hash=$2 AND worker_lease_until>now() RETURNING id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, id, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
+	err = a.db.QueryRow(r.Context(), `WITH consumed AS (
+		UPDATE worker_leases SET lease_hash=NULL,lease_until=NULL WHERE monitor_id=$1 AND region=$3 AND lease_hash=$2 AND lease_until>now() RETURNING monitor_id
+	) SELECT m.id,m.name,m.url,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now(),m.monitor_type,m.expected_keyword
+	FROM monitors m JOIN consumed c ON c.monitor_id=m.id`, id, hash[:], region).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 409, "lease expired or already used")
 		return
@@ -171,7 +181,7 @@ func runWorker(ctx context.Context, coordinator, token, region string) error {
 		if err != nil {
 			return err
 		}
-		item := dueMonitor{id: job.ID, name: job.Name, url: job.URL, monitorType: job.MonitorType, expectedKeyword: job.ExpectedKeyword, timeoutSeconds: job.TimeoutSeconds, failureThreshold: job.FailureThreshold, recoveryThreshold: job.RecoveryThreshold, maintenance: job.Maintenance}
+		item := dueMonitor{id: job.ID, name: job.Name, url: job.URL, monitorType: job.MonitorType, expectedKeyword: job.ExpectedKeyword, timeoutSeconds: job.TimeoutSeconds, intervalSeconds: job.IntervalSeconds, failureThreshold: job.FailureThreshold, recoveryThreshold: job.RecoveryThreshold, maintenance: job.Maintenance}
 		checked := performCheck(ctx, item)
 		payload, _ := json.Marshal(workerResult{Up: checked.up, StatusCode: checked.statusCode, ResponseMS: checked.responseMS, Message: checked.message, CertificateExpiresAt: checked.certificateExpiresAt, Lease: job.Lease})
 		req, _ = http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/worker/results/%d", strings.TrimRight(coordinator, "/"), job.ID), bytes.NewReader(payload))

@@ -633,7 +633,7 @@ func (a *app) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := sha256.Sum256([]byte(token))
 	var item dueMonitor
-	err := a.db.QueryRow(r.Context(), `UPDATE monitors SET next_check_at=now()+(interval_seconds*interval '1 second') WHERE heartbeat_token_hash=$1 AND monitor_type='heartbeat' AND active RETURNING id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
+	err := a.db.QueryRow(r.Context(), `UPDATE monitors SET next_check_at=now()+(interval_seconds*interval '1 second') WHERE heartbeat_token_hash=$1 AND monitor_type='heartbeat' AND active RETURNING id,name,url,timeout_seconds,interval_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "heartbeat not found")
 		return

@@ -24,6 +24,7 @@ type dueMonitor struct {
 	name, url                           string
 	monitorType, expectedKeyword        string
 	timeoutSeconds                      int
+	intervalSeconds                     int
 	failureThreshold, recoveryThreshold int
 	maintenance                         bool
 	region                              string
@@ -87,14 +88,14 @@ func (a *app) claimDue(ctx context.Context) ([]dueMonitor, error) {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,interval_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
 	items := []dueMonitor{}
 	for rows.Next() {
 		var item dueMonitor
-		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword); err != nil {
+		if err := rows.Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -227,8 +228,29 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 	if err != nil {
 		return err
 	}
+	quorum := regionQuorum()
+	if item.region != "" && item.region != "local" && quorum > 1 {
+		var upVotes, downVotes int
+		err = tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE up),count(*) FILTER (WHERE NOT up) FROM (SELECT DISTINCT ON (region) up FROM checks WHERE monitor_id=$1 AND region<>'local' AND checked_at>now()-($2*interval '2 seconds') ORDER BY region,checked_at DESC) votes`, item.id, item.intervalSeconds).Scan(&upVotes, &downVotes)
+		if err != nil {
+			return err
+		}
+		decision, decided := quorumDecision(upVotes, downVotes, quorum)
+		if !decided {
+			return tx.Commit(ctx)
+		}
+		result.up = decision
+		if !decision {
+			message := fmt.Sprintf("regional quorum failure (%d regions)", downVotes)
+			result.message = &message
+		}
+	}
 	var failures, successes int
-	err = tx.QueryRow(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,consecutive_failures=CASE WHEN $6 OR $7 THEN 0 ELSE consecutive_failures+1 END,consecutive_successes=CASE WHEN NOT $6 OR $7 THEN 0 ELSE consecutive_successes+1 END,updated_at=now() WHERE id=$1 RETURNING consecutive_failures,consecutive_successes`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, result.up, item.maintenance).Scan(&failures, &successes)
+	remoteQuorum := item.region != "" && item.region != "local" && quorum > 1
+	err = tx.QueryRow(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,consecutive_failures=CASE WHEN $6 OR $7 THEN 0 ELSE consecutive_failures+1 END,consecutive_successes=CASE WHEN NOT $6 OR $7 THEN 0 ELSE consecutive_successes+1 END,last_quorum_at=CASE WHEN $8 THEN now() ELSE last_quorum_at END,updated_at=now() WHERE id=$1 AND (NOT $8 OR last_quorum_at IS NULL OR last_quorum_at<now()-(interval_seconds*interval '0.5 seconds')) RETURNING consecutive_failures,consecutive_successes`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, result.up, item.maintenance, remoteQuorum).Scan(&failures, &successes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tx.Commit(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -271,6 +293,22 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		}
 	}
 	return tx.Commit(ctx)
+}
+func quorumDecision(up, down, required int) (bool, bool) {
+	if up >= required {
+		return true, true
+	}
+	if down >= required {
+		return false, true
+	}
+	return false, false
+}
+func regionQuorum() int {
+	quorum, err := strconv.Atoi(env("PULSEOPS_REGION_QUORUM", "1"))
+	if err != nil || quorum < 1 || quorum > 10 {
+		return 1
+	}
+	return quorum
 }
 func transition(up, maintenance bool, failures, successes, failureThreshold, recoveryThreshold int) (bool, bool) {
 	if maintenance {

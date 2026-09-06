@@ -156,6 +156,7 @@ Set one shared worker secret on the coordinator and disable its local checks whe
 ```env
 PULSEOPS_WORKER_TOKEN=a-separate-random-secret-at-least-32-characters
 PULSEOPS_LOCAL_CHECKS=false
+PULSEOPS_REGION_QUORUM=2
 ```
 
 Run the regular API image in any region without a database connection:
@@ -168,7 +169,7 @@ docker run --rm \
   pulseops-api
 ```
 
-Add more worker containers with distinct lowercase region names. PostgreSQL leasing distributes due checks safely across them; one-time two-minute leases reject expired or replayed results. Always expose the coordinator over HTTPS.
+Add worker containers with distinct lowercase region names. Each region schedules every monitor independently. `PULSEOPS_REGION_QUORUM=2` requires two regions to agree before health changes; increase it only when at least that many regions are continuously online. PostgreSQL leasing prevents duplicate work inside a region, while one-time two-minute leases reject expired or replayed results. Always expose the coordinator over HTTPS.
 
 ## Operations
 
