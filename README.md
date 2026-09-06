@@ -34,6 +34,7 @@ PulseOps watches HTTP and HTTPS endpoints and cron heartbeats, records response 
 - **Operational follow-through** — acknowledge incidents, attach operator notes, and publish recent public incident history.
 - **30-day reporting** — inspect per-monitor uptime, average response time, and check volume for any 1–90 day window.
 - **Team roles** — issue revocable viewer, operator, or admin access keys; secrets are stored as SHA-256 hashes and shown once.
+- **Regional workers** — run the same small binary near users; workers pull leased checks over HTTPS and report region-tagged results.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
 - **OpenAPI contract** — the machine-readable API description is served at `/api/openapi.json`.
 
@@ -147,6 +148,27 @@ The heartbeat URL is displayed only when the monitor is created. Store it like a
 PulseOps supports a team organization with three enforced roles: viewers can inspect operations, operators can also manage monitors and incidents, and admins can manage team access and the organization profile. The server-configured root token remains the recovery credential. Access keys are stored only as hashes and can be revoked independently. Public APIs expose only monitor health and incidents for monitors marked `public`, never credentials or notification settings. Endpoint validation rejects credentials in URLs, private/loopback/link-local targets, DNS resolutions to private networks, redirects beyond five hops, and TLS below 1.2.
 
 Put internet-facing installations behind HTTPS, use unique secrets, restrict host access, and keep Docker/PostgreSQL patched. Access is token-based; browser password login, SSO, and cross-organization tenant isolation are not part of this deployment model.
+
+### Regional workers
+
+Set one shared worker secret on the coordinator and disable its local checks when all checks should run remotely:
+
+```env
+PULSEOPS_WORKER_TOKEN=a-separate-random-secret-at-least-32-characters
+PULSEOPS_LOCAL_CHECKS=false
+```
+
+Run the regular API image in any region without a database connection:
+
+```bash
+docker run --rm \
+  -e PULSEOPS_COORDINATOR_URL=https://status.example.com \
+  -e PULSEOPS_WORKER_TOKEN=a-separate-random-secret-at-least-32-characters \
+  -e PULSEOPS_WORKER_REGION=eu-west \
+  pulseops-api
+```
+
+Add more worker containers with distinct lowercase region names. PostgreSQL leasing distributes due checks safely across them; one-time two-minute leases reject expired or replayed results. Always expose the coordinator over HTTPS.
 
 ## Operations
 

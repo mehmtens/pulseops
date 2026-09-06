@@ -32,6 +32,19 @@ func TestRolePermissions(t *testing.T) {
 	}
 }
 
+func TestWorkerRegionValidation(t *testing.T) {
+	for _, region := range []string{"eu-west", "tr_istanbul", "us1"} {
+		if !validRegion(region) {
+			t.Fatalf("valid region rejected: %s", region)
+		}
+	}
+	for _, region := range []string{"", "EU West", "../local"} {
+		if validRegion(region) {
+			t.Fatalf("invalid region accepted: %s", region)
+		}
+	}
+}
+
 func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	app := newApp(nil, "0123456789abcdef")
 	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?days=365", nil)

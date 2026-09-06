@@ -1,0 +1,191 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+type workerJob struct {
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	URL               string `json:"url"`
+	MonitorType       string `json:"monitorType"`
+	ExpectedKeyword   string `json:"expectedKeyword"`
+	TimeoutSeconds    int    `json:"timeoutSeconds"`
+	FailureThreshold  int    `json:"failureThreshold"`
+	RecoveryThreshold int    `json:"recoveryThreshold"`
+	Maintenance       bool   `json:"maintenance"`
+	Lease             string `json:"lease"`
+}
+
+type workerResult struct {
+	Up                   bool       `json:"up"`
+	StatusCode           *int       `json:"statusCode"`
+	ResponseMS           int        `json:"responseMs"`
+	Message              *string    `json:"message"`
+	CertificateExpiresAt *time.Time `json:"certificateExpiresAt"`
+	Lease                string     `json:"lease"`
+}
+
+func validRegion(region string) bool {
+	if len(region) < 1 || len(region) > 50 {
+		return false
+	}
+	for _, character := range region {
+		if !(character == '-' || character == '_' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *app) authorizeWorker(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expected := []byte(strings.TrimSpace(env("PULSEOPS_WORKER_TOKEN", "")))
+		provided := []byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if len(expected) < 32 || len(provided) != len(expected) || subtle.ConstantTimeCompare(provided, expected) != 1 {
+			writeError(w, 401, "unauthorized worker")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (a *app) claimWorkerJob(w http.ResponseWriter, r *http.Request) {
+	region := r.Header.Get("X-PulseOps-Region")
+	if !validRegion(region) {
+		writeError(w, 400, "invalid worker region")
+		return
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		writeError(w, 500, "could not lease job")
+		return
+	}
+	lease := "wl_" + hex.EncodeToString(secret)
+	hash := sha256.Sum256([]byte(lease))
+	var job workerJob
+	err := a.db.QueryRow(r.Context(), `WITH due AS (
+		SELECT id FROM monitors WHERE active AND monitor_type<>'heartbeat' AND next_check_at<=now()
+		AND (worker_lease_until IS NULL OR worker_lease_until<now()) ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 1
+	) UPDATE monitors m SET next_check_at=now()+(interval_seconds*interval '1 second'),worker_lease_hash=$1,worker_lease_until=now()+interval '2 minutes'
+	FROM due WHERE m.id=due.id RETURNING m.id,m.name,m.url,m.monitor_type,m.expected_keyword,m.timeout_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now()`, hash[:]).Scan(&job.ID, &job.Name, &job.URL, &job.MonitorType, &job.ExpectedKeyword, &job.TimeoutSeconds, &job.FailureThreshold, &job.RecoveryThreshold, &job.Maintenance)
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.WriteHeader(204)
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	job.Lease = lease
+	writeJSON(w, 200, job)
+}
+
+func (a *app) submitWorkerResult(w http.ResponseWriter, r *http.Request) {
+	region := r.Header.Get("X-PulseOps-Region")
+	if !validRegion(region) {
+		writeError(w, 400, "invalid worker region")
+		return
+	}
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid monitor id")
+		return
+	}
+	var result workerResult
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&result) != nil || result.ResponseMS < 0 || result.ResponseMS > 300000 || result.StatusCode != nil && (*result.StatusCode < 100 || *result.StatusCode > 599) || len(result.Lease) != 67 || !strings.HasPrefix(result.Lease, "wl_") || result.Message != nil && len(*result.Message) > 500 {
+		writeError(w, 400, "invalid result")
+		return
+	}
+	hash := sha256.Sum256([]byte(result.Lease))
+	var item dueMonitor
+	err = a.db.QueryRow(r.Context(), `UPDATE monitors SET worker_lease_hash=NULL,worker_lease_until=NULL WHERE id=$1 AND worker_lease_hash=$2 AND worker_lease_until>now() RETURNING id,name,url,timeout_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, id, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 409, "lease expired or already used")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	item.region = region
+	if err := a.recordCheck(r.Context(), item, checkResult{up: result.Up, statusCode: result.StatusCode, responseMS: result.ResponseMS, message: result.Message, certificateExpiresAt: result.CertificateExpiresAt}); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	a.broadcast()
+	w.WriteHeader(204)
+}
+
+func runWorker(ctx context.Context, coordinator, token, region string) error {
+	if len(token) < 32 || !validRegion(region) {
+		return errors.New("PULSEOPS_WORKER_TOKEN (32+ characters) and a valid PULSEOPS_WORKER_REGION are required")
+	}
+	client := &http.Client{Timeout: 45 * time.Second}
+	for {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(coordinator, "/")+"/api/worker/claim", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-PulseOps-Region", region)
+		response, err := client.Do(req)
+		if err == nil && response.StatusCode == 204 {
+			response.Body.Close()
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		if err != nil {
+			log.Printf("worker claim: %v", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+		if response.StatusCode != 200 {
+			response.Body.Close()
+			return fmt.Errorf("worker claim status %d", response.StatusCode)
+		}
+		var job workerJob
+		err = json.NewDecoder(response.Body).Decode(&job)
+		response.Body.Close()
+		if err != nil {
+			return err
+		}
+		item := dueMonitor{id: job.ID, name: job.Name, url: job.URL, monitorType: job.MonitorType, expectedKeyword: job.ExpectedKeyword, timeoutSeconds: job.TimeoutSeconds, failureThreshold: job.FailureThreshold, recoveryThreshold: job.RecoveryThreshold, maintenance: job.Maintenance}
+		checked := performCheck(ctx, item)
+		payload, _ := json.Marshal(workerResult{Up: checked.up, StatusCode: checked.statusCode, ResponseMS: checked.responseMS, Message: checked.message, CertificateExpiresAt: checked.certificateExpiresAt, Lease: job.Lease})
+		req, _ = http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/worker/results/%d", strings.TrimRight(coordinator, "/"), job.ID), bytes.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-PulseOps-Region", region)
+		req.Header.Set("Content-Type", "application/json")
+		response, err = client.Do(req)
+		if err != nil {
+			log.Printf("worker result: %v", err)
+			continue
+		}
+		response.Body.Close()
+		if response.StatusCode != 204 {
+			log.Printf("worker result status %d", response.StatusCode)
+		}
+	}
+}

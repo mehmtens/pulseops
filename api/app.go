@@ -77,6 +77,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/events", a.events)
 	mux.HandleFunc("POST /api/heartbeat/{token}", a.heartbeat)
 	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
+	mux.Handle("POST /api/worker/claim", a.authorizeWorker(http.HandlerFunc(a.claimWorkerJob)))
+	mux.Handle("POST /api/worker/results/{id}", a.authorizeWorker(http.HandlerFunc(a.submitWorkerResult)))
 	mux.Handle("GET /api/monitors", a.authorize(http.HandlerFunc(a.listMonitors)))
 	mux.Handle("POST /api/monitors", a.authorizeWrite(http.HandlerFunc(a.createMonitor)))
 	mux.Handle("PUT /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.updateMonitor)))
@@ -381,7 +383,7 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid monitor id")
 		return
 	}
-	rows, err := a.db.Query(r.Context(), `SELECT checked_at,up,status_code,response_ms,error,certificate_expires_at FROM checks WHERE monitor_id=$1 ORDER BY checked_at DESC LIMIT 100`, id)
+	rows, err := a.db.Query(r.Context(), `SELECT checked_at,up,status_code,response_ms,error,certificate_expires_at,region FROM checks WHERE monitor_id=$1 ORDER BY checked_at DESC LIMIT 100`, id)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -394,11 +396,12 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 		var status, ms *int
 		var message *string
 		var cert *time.Time
-		if rows.Scan(&at, &up, &status, &ms, &message, &cert) != nil {
+		var region string
+		if rows.Scan(&at, &up, &status, &ms, &message, &cert, &region) != nil {
 			writeError(w, 500, "database error")
 			return
 		}
-		items = append(items, map[string]any{"checkedAt": at, "up": up, "statusCode": status, "responseMs": ms, "error": message, "certificateExpiresAt": cert})
+		items = append(items, map[string]any{"checkedAt": at, "up": up, "statusCode": status, "responseMs": ms, "error": message, "certificateExpiresAt": cert, "region": region})
 	}
 	if rows.Err() != nil {
 		writeError(w, 500, "database error")

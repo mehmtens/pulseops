@@ -26,6 +26,7 @@ type dueMonitor struct {
 	timeoutSeconds                      int
 	failureThreshold, recoveryThreshold int
 	maintenance                         bool
+	region                              string
 }
 type checkResult struct {
 	up                   bool
@@ -218,7 +219,11 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	_, err = tx.Exec(ctx, `INSERT INTO checks(monitor_id,up,status_code,response_ms,error,certificate_expires_at) VALUES($1,$2,$3,$4,$5,$6)`, item.id, result.up, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt)
+	region := item.region
+	if region == "" {
+		region = "local"
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO checks(monitor_id,up,status_code,response_ms,error,certificate_expires_at,region) VALUES($1,$2,$3,$4,$5,$6,$7)`, item.id, result.up, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, region)
 	if err != nil {
 		return err
 	}

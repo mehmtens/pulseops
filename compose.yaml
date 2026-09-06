@@ -19,6 +19,8 @@ services:
       API_ADDR: :8080
       DATABASE_URL: ${DATABASE_URL:-postgres://pulseops:pulseops-local@postgres:5432/pulseops?sslmode=disable}
       PULSEOPS_API_TOKEN: ${PULSEOPS_API_TOKEN:-pulseops-local-token}
+      PULSEOPS_WORKER_TOKEN: ${PULSEOPS_WORKER_TOKEN:-}
+      PULSEOPS_LOCAL_CHECKS: ${PULSEOPS_LOCAL_CHECKS:-true}
       BREVO_API_KEY: ${BREVO_API_KEY:-}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}

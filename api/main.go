@@ -27,6 +27,12 @@ var openAPIDocument []byte
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if coordinator := os.Getenv("PULSEOPS_COORDINATOR_URL"); coordinator != "" {
+		if err := runWorker(ctx, coordinator, os.Getenv("PULSEOPS_WORKER_TOKEN"), env("PULSEOPS_WORKER_REGION", "local")); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	databaseURL, token := os.Getenv("DATABASE_URL"), os.Getenv("PULSEOPS_API_TOKEN")
 	if databaseURL == "" || len(token) < 16 {
 		log.Fatal("DATABASE_URL and PULSEOPS_API_TOKEN (at least 16 characters) are required")
@@ -43,7 +49,9 @@ func main() {
 		log.Fatalf("migrate database: %v", err)
 	}
 	app := newApp(pool, token)
-	go app.runScheduler(ctx)
+	if env("PULSEOPS_LOCAL_CHECKS", "true") != "false" {
+		go app.runScheduler(ctx)
+	}
 	server := &http.Server{Addr: env("API_ADDR", ":8080"), Handler: app.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("PulseOps API listening on %s", server.Addr)
