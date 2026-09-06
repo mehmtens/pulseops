@@ -28,6 +28,24 @@ type app struct {
 	clientsMu sync.Mutex
 	clients   map[chan struct{}]struct{}
 }
+type actorContextKey struct{}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *auditResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *auditResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
 type monitor struct {
 	ID                   int64      `json:"id"`
 	Name                 string     `json:"name"`
@@ -92,6 +110,7 @@ func (a *app) routes() http.Handler {
 	mux.Handle("DELETE /api/keys/{id}", a.authorizeAdmin(http.HandlerFunc(a.deleteKey)))
 	mux.Handle("GET /api/organization", a.authorize(http.HandlerFunc(a.getOrganization)))
 	mux.Handle("PUT /api/organization", a.authorizeAdmin(http.HandlerFunc(a.updateOrganization)))
+	mux.Handle("GET /api/audit", a.authorizeAdmin(http.HandlerFunc(a.listAudit)))
 	return securityHeaders(mux)
 }
 
@@ -125,7 +144,10 @@ func (a *app) authorizeRole(write, admin bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if len(provided) == len(a.token) && subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) == 1 {
-			next.ServeHTTP(w, r)
+			recorder := &auditResponseWriter{ResponseWriter: w}
+			authorizedRequest := r.WithContext(context.WithValue(r.Context(), actorContextKey{}, "root"))
+			next.ServeHTTP(recorder, authorizedRequest)
+			a.audit(authorizedRequest, recorder.status)
 			return
 		}
 		if a.db == nil || !strings.HasPrefix(provided, "po_") {
@@ -142,8 +164,22 @@ func (a *app) authorizeRole(write, admin bool, next http.Handler) http.Handler {
 			writeError(w, 403, "insufficient role")
 			return
 		}
-		next.ServeHTTP(w, r)
+		recorder := &auditResponseWriter{ResponseWriter: w}
+		authorizedRequest := r.WithContext(context.WithValue(r.Context(), actorContextKey{}, scope+":"+provided[:11]))
+		next.ServeHTTP(recorder, authorizedRequest)
+		a.audit(authorizedRequest, recorder.status)
 	})
+}
+
+func (a *app) audit(r *http.Request, status int) {
+	if a.db == nil || status < 200 || status >= 300 || (r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete) {
+		return
+	}
+	actor, _ := r.Context().Value(actorContextKey{}).(string)
+	if actor == "" {
+		return
+	}
+	_, _ = a.db.Exec(r.Context(), `INSERT INTO audit_events(actor,action,resource,status) VALUES($1,$2,$3,$4)`, actor, r.Method, r.URL.Path, status)
 }
 func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
@@ -606,6 +642,31 @@ func (a *app) updateOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "name": in.Name})
+}
+
+func (a *app) listAudit(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(r.Context(), `SELECT actor,action,resource,status,created_at FROM audit_events ORDER BY created_at DESC LIMIT 200`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var actor, action, resource string
+		var status int
+		var created time.Time
+		if rows.Scan(&actor, &action, &resource, &status, &created) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		items = append(items, map[string]any{"actor": actor, "action": action, "resource": resource, "status": status, "createdAt": created})
+	}
+	if rows.Err() != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, items)
 }
 func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
 	id, err := monitorID(r)

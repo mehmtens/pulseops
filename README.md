@@ -35,6 +35,7 @@ PulseOps watches HTTP and HTTPS endpoints and cron heartbeats, records response 
 - **30-day reporting** — inspect per-monitor uptime, average response time, and check volume for any 1–90 day window.
 - **Team roles** — issue revocable viewer, operator, or admin access keys; secrets are stored as SHA-256 hashes and shown once.
 - **Regional workers** — run the same small binary near users; workers pull leased checks over HTTPS and report region-tagged results.
+- **Audit trail** — admins can inspect successful monitor, incident, key, and organization mutations with actor, path, status, and timestamp.
 - **Production-minded defaults** — SSRF protection, bearer-token administration, security headers, non-root API image, graceful shutdown, database migrations, and health/readiness probes.
 - **OpenAPI contract** — the machine-readable API description is served at `/api/openapi.json`.
 
@@ -134,6 +135,7 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET/POST` | `/api/keys` | Admin | List/create team access keys |
 | `DELETE` | `/api/keys/{id}` | Admin | Revoke an access key |
 | `GET/PUT` | `/api/organization` | Member/Admin | Read or rename the organization |
+| `GET` | `/api/audit` | Admin | Recent successful changes |
 
 For a heartbeat monitor, send a request after the job succeeds:
 

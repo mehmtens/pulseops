@@ -57,6 +57,14 @@ func TestQuorumDecision(t *testing.T) {
 	}
 }
 
+func TestAuditResponseWriterDefaultsStatus(t *testing.T) {
+	recorder := &auditResponseWriter{ResponseWriter: httptest.NewRecorder()}
+	_, _ = recorder.Write([]byte("ok"))
+	if recorder.status != http.StatusOK {
+		t.Fatalf("got %d, want 200", recorder.status)
+	}
+}
+
 func TestUptimeReportRejectsInvalidRange(t *testing.T) {
 	app := newApp(nil, "0123456789abcdef")
 	request := httptest.NewRequest(http.MethodGet, "/api/reports/uptime?days=365", nil)
