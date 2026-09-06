@@ -20,7 +20,7 @@ matter for a real production team. Every phase has a runnable acceptance check.
 
 ## Phase 1 — harden the current platform (next)
 
-- [ ] Add audit retention and an export endpoint so audit data cannot grow
+- [x] Add audit retention and a CSV export endpoint so audit data cannot grow
   without bound and can be reviewed during an incident.
 - [x] Add notification delivery metrics (queued, delivered, retrying) to the
   dashboard and API.

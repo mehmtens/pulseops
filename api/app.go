@@ -646,6 +646,11 @@ func (a *app) updateOrganization(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) listAudit(w http.ResponseWriter, r *http.Request) {
+	format := r.URL.Query().Get("format")
+	if format != "" && format != "csv" {
+		writeError(w, 400, "format must be csv")
+		return
+	}
 	rows, err := a.db.Query(r.Context(), `SELECT actor,action,resource,status,created_at FROM audit_events ORDER BY created_at DESC LIMIT 200`)
 	if err != nil {
 		writeError(w, 500, "database error")
@@ -653,6 +658,7 @@ func (a *app) listAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	items := []map[string]any{}
+	csvRows := [][]string{{"actor", "action", "resource", "status", "created_at"}}
 	for rows.Next() {
 		var actor, action, resource string
 		var status int
@@ -662,9 +668,17 @@ func (a *app) listAudit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"actor": actor, "action": action, "resource": resource, "status": status, "createdAt": created})
+		csvRows = append(csvRows, []string{actor, action, resource, strconv.Itoa(status), created.UTC().Format(time.RFC3339)})
 	}
 	if rows.Err() != nil {
 		writeError(w, 500, "database error")
+		return
+	}
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="pulseops-audit.csv"`)
+		writer := csv.NewWriter(w)
+		_ = writer.WriteAll(csvRows)
 		return
 	}
 	writeJSON(w, 200, items)
