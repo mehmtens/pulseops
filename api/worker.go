@@ -88,7 +88,7 @@ func (a *app) claimWorkerJob(w http.ResponseWriter, r *http.Request) {
 		SELECT m.id,$2,now()+(m.interval_seconds*interval '1 second'),$1,now()+interval '2 minutes' FROM monitors m JOIN candidate c ON c.id=m.id
 		ON CONFLICT (monitor_id,region) DO UPDATE SET next_check_at=EXCLUDED.next_check_at,lease_hash=EXCLUDED.lease_hash,lease_until=EXCLUDED.lease_until
 		WHERE worker_leases.lease_until IS NULL OR worker_leases.lease_until<now() RETURNING monitor_id
-	) SELECT m.id,m.name,m.url,m.monitor_type,m.expected_keyword,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now()
+	) SELECT m.id,m.name,m.url,m.monitor_type,m.expected_keyword,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,`+maintenanceActive+`
 	FROM monitors m JOIN leased l ON l.monitor_id=m.id`, hash[:], region).Scan(&job.ID, &job.Name, &job.URL, &job.MonitorType, &job.ExpectedKeyword, &job.TimeoutSeconds, &job.IntervalSeconds, &job.FailureThreshold, &job.RecoveryThreshold, &job.Maintenance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		w.WriteHeader(204)
@@ -124,7 +124,7 @@ func (a *app) submitWorkerResult(w http.ResponseWriter, r *http.Request) {
 	var item dueMonitor
 	err = a.db.QueryRow(r.Context(), `WITH consumed AS (
 		UPDATE worker_leases SET lease_hash=NULL,lease_until=NULL WHERE monitor_id=$1 AND region=$3 AND lease_hash=$2 AND lease_until>now() RETURNING monitor_id
-	) SELECT m.id,m.name,m.url,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,m.maintenance_until IS NOT NULL AND m.maintenance_until>now(),m.monitor_type,m.expected_keyword
+	) SELECT m.id,m.name,m.url,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,`+maintenanceActive+`,m.monitor_type,m.expected_keyword
 	FROM monitors m JOIN consumed c ON c.monitor_id=m.id`, id, hash[:], region).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 409, "lease expired or already used")

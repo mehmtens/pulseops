@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ type monitor struct {
 	ConsecutiveFailures  int        `json:"consecutiveFailures"`
 	ConsecutiveSuccesses int        `json:"consecutiveSuccesses"`
 	MaintenanceUntil     *time.Time `json:"maintenanceUntil"`
+	MaintenanceActive    bool       `json:"maintenanceActive"`
 	LastCheckedAt        *time.Time `json:"lastCheckedAt"`
 	LastStatusCode       *int       `json:"lastStatusCode"`
 	LastResponseMS       *int       `json:"lastResponseMs"`
@@ -82,6 +84,24 @@ type monitorInput struct {
 	MonitorType       string     `json:"monitorType"`
 	ExpectedKeyword   string     `json:"expectedKeyword"`
 }
+type maintenanceSchedule struct {
+	ID              int64    `json:"id"`
+	MonitorID       int64    `json:"monitorId"`
+	Weekday         int      `json:"weekday"`
+	StartMinute     int      `json:"startMinute"`
+	DurationMinutes int      `json:"durationMinutes"`
+	Timezone        string   `json:"timezone"`
+	ExceptionDates  []string `json:"exceptionDates"`
+	Enabled         bool     `json:"enabled"`
+}
+type maintenanceScheduleInput struct {
+	Weekday         int      `json:"weekday"`
+	StartMinute     int      `json:"startMinute"`
+	DurationMinutes int      `json:"durationMinutes"`
+	Timezone        string   `json:"timezone"`
+	ExceptionDates  []string `json:"exceptionDates"`
+	Enabled         *bool    `json:"enabled"`
+}
 
 func newApp(db *pgxpool.Pool, token string) *app {
 	return &app{db: db, token: token, clients: make(map[chan struct{}]struct{})}
@@ -101,6 +121,10 @@ func (a *app) routes() http.Handler {
 	mux.Handle("POST /api/monitors", a.authorizeWrite(http.HandlerFunc(a.createMonitor)))
 	mux.Handle("PUT /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.updateMonitor)))
 	mux.Handle("DELETE /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.deleteMonitor)))
+	mux.Handle("GET /api/maintenance-schedules", a.authorize(http.HandlerFunc(a.listAllMaintenanceSchedules)))
+	mux.Handle("GET /api/monitors/{id}/maintenance-schedules", a.authorize(http.HandlerFunc(a.listMaintenanceSchedules)))
+	mux.Handle("POST /api/monitors/{id}/maintenance-schedules", a.authorizeWrite(http.HandlerFunc(a.createMaintenanceSchedule)))
+	mux.Handle("DELETE /api/monitors/{id}/maintenance-schedules/{scheduleId}", a.authorizeWrite(http.HandlerFunc(a.deleteMaintenanceSchedule)))
 	mux.Handle("GET /api/monitors/{id}/checks", a.authorize(http.HandlerFunc(a.listChecks)))
 	mux.Handle("GET /api/incidents", a.authorize(http.HandlerFunc(a.listIncidents)))
 	mux.Handle("PATCH /api/incidents/{id}", a.authorizeWrite(http.HandlerFunc(a.updateIncident)))
@@ -192,11 +216,12 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ready"})
 }
 
-const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL),m.monitor_type,m.expected_keyword FROM monitors m`
+const maintenanceActive = `(COALESCE(m.maintenance_until>now(),false) OR EXISTS (SELECT 1 FROM maintenance_schedules s WHERE s.monitor_id=m.id AND s.enabled AND EXTRACT(DOW FROM timezone(s.timezone,now()))::int=s.weekday AND timezone(s.timezone,now())::date::text<>ALL(s.exception_dates) AND (EXTRACT(HOUR FROM timezone(s.timezone,now()))::int*60+EXTRACT(MINUTE FROM timezone(s.timezone,now()))::int) BETWEEN s.start_minute AND s.start_minute+s.duration_minutes-1))`
+const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,` + maintenanceActive + `,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL),m.monitor_type,m.expected_keyword FROM monitors m`
 
 func scanMonitor(row pgx.Row) (monitor, error) {
 	var m monitor
-	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt, &m.MonitorType, &m.ExpectedKeyword)
+	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.MaintenanceActive, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt, &m.MonitorType, &m.ExpectedKeyword)
 	return m, err
 }
 func (a *app) queryMonitors(ctx context.Context, publicOnly bool) ([]monitor, error) {
@@ -410,6 +435,144 @@ func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if command.RowsAffected() == 0 {
 		writeError(w, 404, "monitor not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+func scheduleID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("scheduleId"), 10, 64)
+}
+func validateMaintenanceSchedule(in maintenanceScheduleInput) (maintenanceScheduleInput, error) {
+	if in.Weekday < 0 || in.Weekday > 6 || in.StartMinute < 0 || in.StartMinute > 1439 || in.DurationMinutes < 1 || in.DurationMinutes > 1440-in.StartMinute {
+		return in, errors.New("weekday must be 0-6, and the window must fit within one day")
+	}
+	in.Timezone = strings.TrimSpace(in.Timezone)
+	if in.Timezone == "" {
+		in.Timezone = "UTC"
+	}
+	if len(in.Timezone) > 64 {
+		return in, errors.New("timezone is too long")
+	}
+	if _, err := time.LoadLocation(in.Timezone); err != nil {
+		return in, errors.New("timezone must be a valid IANA timezone")
+	}
+	if len(in.ExceptionDates) > 100 {
+		return in, errors.New("no more than 100 exception dates are allowed")
+	}
+	seen := make(map[string]struct{}, len(in.ExceptionDates))
+	for _, date := range in.ExceptionDates {
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			return in, errors.New("exception dates must use YYYY-MM-DD")
+		}
+		seen[date] = struct{}{}
+	}
+	in.ExceptionDates = in.ExceptionDates[:0]
+	for date := range seen {
+		in.ExceptionDates = append(in.ExceptionDates, date)
+	}
+	slices.Sort(in.ExceptionDates)
+	return in, nil
+}
+func scanMaintenanceSchedules(rows pgx.Rows) ([]maintenanceSchedule, error) {
+	items := []maintenanceSchedule{}
+	for rows.Next() {
+		var item maintenanceSchedule
+		if err := rows.Scan(&item.ID, &item.MonitorID, &item.Weekday, &item.StartMinute, &item.DurationMinutes, &item.Timezone, &item.ExceptionDates, &item.Enabled); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+func (a *app) listAllMaintenanceSchedules(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(r.Context(), `SELECT id,monitor_id,weekday,start_minute,duration_minutes,timezone,exception_dates,enabled FROM maintenance_schedules ORDER BY monitor_id,weekday,start_minute`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items, err := scanMaintenanceSchedules(rows)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, items)
+}
+func (a *app) listMaintenanceSchedules(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid monitor id")
+		return
+	}
+	rows, err := a.db.Query(r.Context(), `SELECT id,monitor_id,weekday,start_minute,duration_minutes,timezone,exception_dates,enabled FROM maintenance_schedules WHERE monitor_id=$1 ORDER BY weekday,start_minute`, id)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items, err := scanMaintenanceSchedules(rows)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 200, items)
+}
+func (a *app) createMaintenanceSchedule(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid monitor id")
+		return
+	}
+	var in maintenanceScheduleInput
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid schedule")
+		return
+	}
+	in, err = validateMaintenanceSchedule(in)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+	var item maintenanceSchedule
+	err = a.db.QueryRow(r.Context(), `INSERT INTO maintenance_schedules(monitor_id,weekday,start_minute,duration_minutes,timezone,exception_dates,enabled) SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM monitors WHERE id=$1) RETURNING id,monitor_id,weekday,start_minute,duration_minutes,timezone,exception_dates,enabled`, id, in.Weekday, in.StartMinute, in.DurationMinutes, in.Timezone, in.ExceptionDates, enabled).Scan(&item.ID, &item.MonitorID, &item.Weekday, &item.StartMinute, &item.DurationMinutes, &item.Timezone, &item.ExceptionDates, &item.Enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 404, "monitor not found")
+		return
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "maintenance_schedules_monitor_id_weekday_start_minute_key") {
+			writeError(w, 409, "schedule already exists")
+			return
+		}
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 201, item)
+}
+func (a *app) deleteMaintenanceSchedule(w http.ResponseWriter, r *http.Request) {
+	monitor, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid monitor id")
+		return
+	}
+	schedule, err := scheduleID(r)
+	if err != nil {
+		writeError(w, 400, "invalid schedule id")
+		return
+	}
+	command, err := a.db.Exec(r.Context(), `DELETE FROM maintenance_schedules WHERE id=$1 AND monitor_id=$2`, schedule, monitor)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if command.RowsAffected() == 0 {
+		writeError(w, 404, "schedule not found")
 		return
 	}
 	w.WriteHeader(204)
@@ -740,7 +903,7 @@ func (a *app) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := sha256.Sum256([]byte(token))
 	var item dueMonitor
-	err := a.db.QueryRow(r.Context(), `UPDATE monitors SET next_check_at=now()+(interval_seconds*interval '1 second') WHERE heartbeat_token_hash=$1 AND monitor_type='heartbeat' AND active RETURNING id,name,url,timeout_seconds,interval_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword`, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
+	err := a.db.QueryRow(r.Context(), `UPDATE monitors AS m SET next_check_at=now()+(m.interval_seconds*interval '1 second') WHERE m.heartbeat_token_hash=$1 AND m.monitor_type='heartbeat' AND m.active RETURNING m.id,m.name,m.url,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,`+maintenanceActive+`,m.monitor_type,m.expected_keyword`, hash[:]).Scan(&item.id, &item.name, &item.url, &item.timeoutSeconds, &item.intervalSeconds, &item.failureThreshold, &item.recoveryThreshold, &item.maintenance, &item.monitorType, &item.expectedKeyword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "heartbeat not found")
 		return

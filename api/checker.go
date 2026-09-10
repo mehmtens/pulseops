@@ -99,7 +99,7 @@ func (a *app) claimDue(ctx context.Context) ([]dueMonitor, error) {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	rows, err := tx.Query(ctx, `SELECT id,name,url,timeout_seconds,interval_seconds,failure_threshold,recovery_threshold,maintenance_until IS NOT NULL AND maintenance_until>now(),monitor_type,expected_keyword FROM monitors WHERE active AND next_check_at<=now() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+	rows, err := tx.Query(ctx, `SELECT m.id,m.name,m.url,m.timeout_seconds,m.interval_seconds,m.failure_threshold,m.recovery_threshold,`+maintenanceActive+`,m.monitor_type,m.expected_keyword FROM monitors m WHERE m.active AND m.next_check_at<=now() ORDER BY m.next_check_at FOR UPDATE OF m SKIP LOCKED LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
@@ -231,6 +231,10 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+	var maintenance bool
+	if err := tx.QueryRow(ctx, `SELECT `+maintenanceActive+` FROM monitors m WHERE m.id=$1 FOR UPDATE`, item.id).Scan(&maintenance); err != nil {
+		return err
+	}
 	region := item.region
 	if region == "" {
 		region = "local"
@@ -258,7 +262,7 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 	}
 	var failures, successes int
 	remoteQuorum := item.region != "" && item.region != "local" && quorum > 1
-	err = tx.QueryRow(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,consecutive_failures=CASE WHEN $6 OR $7 THEN 0 ELSE consecutive_failures+1 END,consecutive_successes=CASE WHEN NOT $6 OR $7 THEN 0 ELSE consecutive_successes+1 END,last_quorum_at=CASE WHEN $8 THEN now() ELSE last_quorum_at END,updated_at=now() WHERE id=$1 AND (NOT $8 OR last_quorum_at IS NULL OR last_quorum_at<now()-(interval_seconds*interval '0.5 seconds')) RETURNING consecutive_failures,consecutive_successes`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, result.up, item.maintenance, remoteQuorum).Scan(&failures, &successes)
+	err = tx.QueryRow(ctx, `UPDATE monitors SET last_checked_at=now(),last_status_code=$2,last_response_ms=$3,last_error=$4,certificate_expires_at=$5,consecutive_failures=CASE WHEN $6 OR $7 THEN 0 ELSE consecutive_failures+1 END,consecutive_successes=CASE WHEN NOT $6 OR $7 THEN 0 ELSE consecutive_successes+1 END,last_quorum_at=CASE WHEN $8 THEN now() ELSE last_quorum_at END,updated_at=now() WHERE id=$1 AND (NOT $8 OR last_quorum_at IS NULL OR last_quorum_at<now()-(interval_seconds*interval '0.5 seconds')) RETURNING consecutive_failures,consecutive_successes`, item.id, result.statusCode, result.responseMS, result.message, result.certificateExpiresAt, result.up, maintenance, remoteQuorum).Scan(&failures, &successes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return tx.Commit(ctx)
 	}
@@ -266,7 +270,7 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		return err
 	}
 	eventKey, subject, body := "", "", ""
-	openIncident, resolveIncident := transition(result.up, item.maintenance, failures, successes, item.failureThreshold, item.recoveryThreshold)
+	openIncident, resolveIncident := transition(result.up, maintenance, failures, successes, item.failureThreshold, item.recoveryThreshold)
 	if openIncident {
 		var incidentID int64
 		err = tx.QueryRow(ctx, `INSERT INTO incidents(monitor_id,cause) VALUES($1,$2) ON CONFLICT (monitor_id) WHERE resolved_at IS NULL DO NOTHING RETURNING id`, item.id, value(result.message, "check failed")).Scan(&incidentID)
@@ -288,7 +292,7 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 			return err
 		}
 	}
-	if !item.maintenance && eventKey == "" && result.certificateExpiresAt != nil {
+	if !maintenance && eventKey == "" && result.certificateExpiresAt != nil {
 		days, _ := strconv.Atoi(env("SSL_WARNING_DAYS", "14"))
 		if time.Until(*result.certificateExpiresAt) < time.Duration(days)*24*time.Hour {
 			eventKey = "ssl:" + result.certificateExpiresAt.Format("2006-01-02")

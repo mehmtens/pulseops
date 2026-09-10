@@ -134,6 +134,9 @@ Administrative endpoints require `Authorization: Bearer <PULSEOPS_API_TOKEN>`.
 | `GET` | `/api/openapi.json` | Public | OpenAPI 3.1 description |
 | `GET/POST` | `/api/monitors` | Admin | List/create monitors |
 | `PUT/DELETE` | `/api/monitors/{id}` | Admin | Update/delete a monitor |
+| `GET` | `/api/maintenance-schedules` | Member | List recurring maintenance schedules in one request |
+| `GET/POST` | `/api/monitors/{id}/maintenance-schedules` | Read/Write | List/create weekly maintenance windows with timezone-aware exception dates |
+| `DELETE` | `/api/monitors/{id}/maintenance-schedules/{scheduleId}` | Write | Delete a recurring maintenance window |
 | `GET` | `/api/monitors/{id}/checks` | Admin | Latest 100 checks |
 | `GET` | `/api/incidents` | Admin | Latest 100 incidents |
 | `PATCH` | `/api/incidents/{id}` | Write | Acknowledge an incident and save an operator note |

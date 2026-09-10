@@ -1,10 +1,13 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "PulseOps API", "version": "1.1.0", "description": "Self-hosted HTTP, heartbeat, TCP, and DNS monitoring API." },
+  "info": { "title": "PulseOps API", "version": "1.2.0", "description": "Self-hosted HTTP, heartbeat, TCP, and DNS monitoring API." },
   "servers": [{ "url": "/" }],
   "components": {
     "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
-    "parameters": { "id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } } },
+    "parameters": {
+      "id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } },
+      "scheduleId": { "name": "scheduleId", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+    },
     "schemas": {
       "MonitorInput": {
         "type": "object", "required": ["name", "monitorType"],
@@ -15,6 +18,30 @@
           "failureThreshold": { "type": "integer", "minimum": 1, "maximum": 10 }, "recoveryThreshold": { "type": "integer", "minimum": 1, "maximum": 10 },
           "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "active": { "type": "boolean" }, "public": { "type": "boolean" }
         }
+      },
+      "Monitor": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" }, "name": { "type": "string" },
+          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "maintenanceActive": { "type": "boolean" }
+        }
+      },
+      "MaintenanceScheduleInput": {
+        "type": "object", "required": ["weekday", "startMinute", "durationMinutes", "timezone"],
+        "properties": {
+          "weekday": { "type": "integer", "minimum": 0, "maximum": 6 },
+          "startMinute": { "type": "integer", "minimum": 0, "maximum": 1439 },
+          "durationMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
+          "timezone": { "type": "string", "maxLength": 64, "example": "Europe/Istanbul" },
+          "exceptionDates": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "date" } },
+          "enabled": { "type": "boolean", "default": true }
+        }
+      },
+      "MaintenanceSchedule": {
+        "allOf": [
+          { "$ref": "#/components/schemas/MaintenanceScheduleInput" },
+          { "type": "object", "properties": { "id": { "type": "integer", "format": "int64" }, "monitorId": { "type": "integer", "format": "int64" } } }
+        ]
       }
     }
   },
@@ -25,12 +52,22 @@
     "/api/events": { "get": { "summary": "Status Server-Sent Events", "responses": { "200": { "description": "Event stream" } } } },
     "/api/heartbeat/{token}": { "post": { "summary": "Record a heartbeat", "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Heartbeat recorded" }, "404": { "description": "Unknown heartbeat" } } } },
     "/api/monitors": {
-      "get": { "summary": "List monitors", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Monitor list" } } },
+      "get": { "summary": "List monitors", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Monitor list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Monitor" } } } } } } },
       "post": { "summary": "Create a monitor", "security": [{ "bearerAuth": [] }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MonitorInput" } } } }, "responses": { "201": { "description": "Monitor created" } } }
     },
     "/api/monitors/{id}": {
       "put": { "summary": "Update a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Monitor updated" } } },
       "delete": { "summary": "Delete a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Monitor deleted" } } }
+    },
+    "/api/maintenance-schedules": {
+      "get": { "summary": "List all recurring maintenance schedules", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Maintenance schedule list" } } }
+    },
+    "/api/monitors/{id}/maintenance-schedules": {
+      "get": { "summary": "List recurring maintenance schedules for a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Maintenance schedule list" } } },
+      "post": { "summary": "Create a recurring maintenance schedule", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MaintenanceScheduleInput" } } } }, "responses": { "201": { "description": "Maintenance schedule created" } } }
+    },
+    "/api/monitors/{id}/maintenance-schedules/{scheduleId}": {
+      "delete": { "summary": "Delete a recurring maintenance schedule", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/scheduleId" }], "responses": { "204": { "description": "Maintenance schedule deleted" } } }
     },
     "/api/incidents": { "get": { "summary": "List incidents", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Incident list" } } } },
     "/api/reports/uptime": { "get": { "summary": "Generate a 1–90 day uptime report", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Uptime report" } } } },

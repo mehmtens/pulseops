@@ -152,6 +152,34 @@ func TestOpenAPIDocument(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", response.Code)
 	}
+	paths := document["paths"].(map[string]any)
+	if paths["/api/maintenance-schedules"] == nil || paths["/api/monitors/{id}/maintenance-schedules"] == nil {
+		t.Fatal("maintenance schedule endpoints are missing from OpenAPI")
+	}
+	schemas := document["components"].(map[string]any)["schemas"].(map[string]any)
+	monitor := schemas["Monitor"].(map[string]any)
+	if monitor["properties"].(map[string]any)["maintenanceActive"] == nil {
+		t.Fatal("maintenanceActive is missing from the Monitor schema")
+	}
+}
+
+func TestMaintenanceScheduleValidation(t *testing.T) {
+	valid, err := validateMaintenanceSchedule(maintenanceScheduleInput{Weekday: 1, StartMinute: 540, DurationMinutes: 60, Timezone: "Europe/Istanbul", ExceptionDates: []string{"2026-12-28", "2026-12-28"}})
+	if err != nil || valid.Timezone != "Europe/Istanbul" || len(valid.ExceptionDates) != 1 {
+		t.Fatalf("valid schedule rejected: %+v, %v", valid, err)
+	}
+	for name, input := range map[string]maintenanceScheduleInput{
+		"weekday":     {Weekday: 7, DurationMinutes: 60},
+		"crosses day": {Weekday: 1, StartMinute: 1380, DurationMinutes: 120},
+		"timezone":    {Weekday: 1, DurationMinutes: 60, Timezone: "Mars/Olympus"},
+		"exception":   {Weekday: 1, DurationMinutes: 60, ExceptionDates: []string{"28-12-2026"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := validateMaintenanceSchedule(input); err == nil {
+				t.Fatal("invalid schedule accepted")
+			}
+		})
+	}
 }
 
 func TestSafeDialerRejectsPrivateAddress(t *testing.T) {
