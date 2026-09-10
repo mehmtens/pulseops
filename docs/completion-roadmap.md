@@ -13,7 +13,7 @@ Each slice ends with code, tests, documentation, and one runnable acceptance che
 - [x] Cover migration head/idempotency, expired leases, quorum ties, and notification
   retry backoff with regression tests.
 - [x] Run backend tests, frontend tests/build, and a fresh-schema Compose migration check.
-- [ ] Commit the slice and confirm the GitHub Actions run is green.
+- [x] Commit the slice and confirm the GitHub Actions run is green.
 
 Exit: all Phase 1 roadmap boxes and its acceptance statement are demonstrably true.
 
