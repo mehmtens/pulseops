@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type app struct {
 	clients   map[chan struct{}]struct{}
 }
 type actorContextKey struct{}
+type apiKeyContextKey struct{}
 
 type auditResponseWriter struct {
 	http.ResponseWriter
@@ -70,19 +72,25 @@ type monitor struct {
 	IncidentStartedAt    *time.Time `json:"incidentStartedAt"`
 	MonitorType          string     `json:"monitorType"`
 	ExpectedKeyword      string     `json:"expectedKeyword"`
+	NotificationChannels []string   `json:"notificationChannels"`
+	EscalationDelay      int        `json:"escalationDelaySeconds"`
+	StatusComponent      string     `json:"statusComponent"`
 }
 type monitorInput struct {
-	Name              string     `json:"name"`
-	URL               string     `json:"url"`
-	IntervalSeconds   int        `json:"intervalSeconds"`
-	TimeoutSeconds    int        `json:"timeoutSeconds"`
-	Active            *bool      `json:"active"`
-	Public            *bool      `json:"public"`
-	FailureThreshold  int        `json:"failureThreshold"`
-	RecoveryThreshold int        `json:"recoveryThreshold"`
-	MaintenanceUntil  *time.Time `json:"maintenanceUntil"`
-	MonitorType       string     `json:"monitorType"`
-	ExpectedKeyword   string     `json:"expectedKeyword"`
+	Name                 string     `json:"name"`
+	URL                  string     `json:"url"`
+	IntervalSeconds      int        `json:"intervalSeconds"`
+	TimeoutSeconds       int        `json:"timeoutSeconds"`
+	Active               *bool      `json:"active"`
+	Public               *bool      `json:"public"`
+	FailureThreshold     int        `json:"failureThreshold"`
+	RecoveryThreshold    int        `json:"recoveryThreshold"`
+	MaintenanceUntil     *time.Time `json:"maintenanceUntil"`
+	MonitorType          string     `json:"monitorType"`
+	ExpectedKeyword      string     `json:"expectedKeyword"`
+	NotificationChannels []string   `json:"notificationChannels"`
+	EscalationDelay      int        `json:"escalationDelaySeconds"`
+	StatusComponent      string     `json:"statusComponent"`
 }
 type maintenanceSchedule struct {
 	ID              int64    `json:"id"`
@@ -117,6 +125,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/openapi.json", a.openAPI)
 	mux.Handle("POST /api/worker/claim", a.authorizeWorker(http.HandlerFunc(a.claimWorkerJob)))
 	mux.Handle("POST /api/worker/results/{id}", a.authorizeWorker(http.HandlerFunc(a.submitWorkerResult)))
+	mux.Handle("GET /api/workers", a.authorize(http.HandlerFunc(a.listWorkers)))
 	mux.Handle("GET /api/monitors", a.authorize(http.HandlerFunc(a.listMonitors)))
 	mux.Handle("POST /api/monitors", a.authorizeWrite(http.HandlerFunc(a.createMonitor)))
 	mux.Handle("PUT /api/monitors/{id}", a.authorizeWrite(http.HandlerFunc(a.updateMonitor)))
@@ -128,15 +137,23 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /api/monitors/{id}/checks", a.authorize(http.HandlerFunc(a.listChecks)))
 	mux.Handle("GET /api/incidents", a.authorize(http.HandlerFunc(a.listIncidents)))
 	mux.Handle("PATCH /api/incidents/{id}", a.authorizeWrite(http.HandlerFunc(a.updateIncident)))
+	mux.Handle("POST /api/incidents/{id}/updates", a.authorizeWrite(http.HandlerFunc(a.createIncidentUpdate)))
 	mux.Handle("GET /api/reports/uptime", a.authorize(http.HandlerFunc(a.uptimeReport)))
 	mux.Handle("GET /api/keys", a.authorizeAdmin(http.HandlerFunc(a.listKeys)))
 	mux.Handle("POST /api/keys", a.authorizeAdmin(http.HandlerFunc(a.createKey)))
 	mux.Handle("DELETE /api/keys/{id}", a.authorizeAdmin(http.HandlerFunc(a.deleteKey)))
+	mux.Handle("GET /api/invitations", a.authorizeAdmin(http.HandlerFunc(a.listInvitations)))
+	mux.Handle("POST /api/invitations", a.authorizeAdmin(http.HandlerFunc(a.createInvitation)))
+	mux.Handle("DELETE /api/invitations/{id}", a.authorizeAdmin(http.HandlerFunc(a.revokeInvitation)))
+	mux.HandleFunc("POST /api/invitations/accept", a.acceptInvitation)
+	mux.Handle("GET /api/push/vapid-public-key", a.authorize(http.HandlerFunc(a.vapidPublicKey)))
+	mux.Handle("PUT /api/push/subscription", a.authorize(http.HandlerFunc(a.savePushSubscription)))
+	mux.Handle("DELETE /api/push/subscription", a.authorize(http.HandlerFunc(a.deletePushSubscription)))
 	mux.Handle("GET /api/organization", a.authorize(http.HandlerFunc(a.getOrganization)))
 	mux.Handle("PUT /api/organization", a.authorizeAdmin(http.HandlerFunc(a.updateOrganization)))
 	mux.Handle("GET /api/audit", a.authorizeAdmin(http.HandlerFunc(a.listAudit)))
 	mux.Handle("GET /api/notifications/metrics", a.authorize(http.HandlerFunc(a.notificationMetrics)))
-	return securityHeaders(mux)
+	return traceHTTPHandler(securityHeaders(mux))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -181,7 +198,8 @@ func (a *app) authorizeRole(write, admin bool, next http.Handler) http.Handler {
 		}
 		hash := sha256.Sum256([]byte(provided))
 		var scope string
-		if err := a.db.QueryRow(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE token_hash=$1 RETURNING scope`, hash[:]).Scan(&scope); err != nil {
+		var keyID int64
+		if err := a.db.QueryRow(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE token_hash=$1 RETURNING id,scope`, hash[:]).Scan(&keyID, &scope); err != nil {
 			writeError(w, 401, "unauthorized")
 			return
 		}
@@ -190,7 +208,8 @@ func (a *app) authorizeRole(write, admin bool, next http.Handler) http.Handler {
 			return
 		}
 		recorder := &auditResponseWriter{ResponseWriter: w}
-		authorizedRequest := r.WithContext(context.WithValue(r.Context(), actorContextKey{}, scope+":"+provided[:11]))
+		ctx := context.WithValue(r.Context(), actorContextKey{}, scope+":"+provided[:11])
+		authorizedRequest := r.WithContext(context.WithValue(ctx, apiKeyContextKey{}, keyID))
 		next.ServeHTTP(recorder, authorizedRequest)
 		a.audit(authorizedRequest, recorder.status)
 	})
@@ -217,11 +236,11 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 const maintenanceActive = `(COALESCE(m.maintenance_until>now(),false) OR EXISTS (SELECT 1 FROM maintenance_schedules s WHERE s.monitor_id=m.id AND s.enabled AND EXTRACT(DOW FROM timezone(s.timezone,now()))::int=s.weekday AND timezone(s.timezone,now())::date::text<>ALL(s.exception_dates) AND (EXTRACT(HOUR FROM timezone(s.timezone,now()))::int*60+EXTRACT(MINUTE FROM timezone(s.timezone,now()))::int) BETWEEN s.start_minute AND s.start_minute+s.duration_minutes-1))`
-const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,` + maintenanceActive + `,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL),m.monitor_type,m.expected_keyword FROM monitors m`
+const monitorSelect = `SELECT m.id,m.name,m.url,m.interval_seconds,m.timeout_seconds,m.active,m.public,m.failure_threshold,m.recovery_threshold,m.consecutive_failures,m.consecutive_successes,m.maintenance_until,` + maintenanceActive + `,m.last_checked_at,m.last_status_code,m.last_response_ms,m.last_error,m.certificate_expires_at,COALESCE((SELECT 100.0*count(*) FILTER (WHERE up)/NULLIF(count(*),0) FROM checks c WHERE c.monitor_id=m.id AND c.checked_at>now()-interval '24 hours'),100),(SELECT started_at FROM incidents i WHERE i.monitor_id=m.id AND i.resolved_at IS NULL),m.monitor_type,m.expected_keyword,m.notification_channels,m.escalation_delay_seconds,m.status_component FROM monitors m`
 
 func scanMonitor(row pgx.Row) (monitor, error) {
 	var m monitor
-	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.MaintenanceActive, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt, &m.MonitorType, &m.ExpectedKeyword)
+	err := row.Scan(&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.TimeoutSeconds, &m.Active, &m.Public, &m.FailureThreshold, &m.RecoveryThreshold, &m.ConsecutiveFailures, &m.ConsecutiveSuccesses, &m.MaintenanceUntil, &m.MaintenanceActive, &m.LastCheckedAt, &m.LastStatusCode, &m.LastResponseMS, &m.LastError, &m.CertificateExpiresAt, &m.Uptime24h, &m.IncidentStartedAt, &m.MonitorType, &m.ExpectedKeyword, &m.NotificationChannels, &m.EscalationDelay, &m.StatusComponent)
 	return m, err
 }
 func (a *app) queryMonitors(ctx context.Context, publicOnly bool) ([]monitor, error) {
@@ -259,7 +278,7 @@ func (a *app) publicStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database error")
 		return
 	}
-	rows, err := a.db.Query(r.Context(), `SELECT i.id,m.name,i.started_at,i.resolved_at,i.cause FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.public ORDER BY i.started_at DESC LIMIT 20`)
+	rows, err := a.db.Query(r.Context(), `SELECT i.id,m.name,i.started_at,i.resolved_at,i.cause,COALESCE(json_agg(json_build_object('id',u.id,'status',u.status,'message',u.message,'createdAt',u.created_at) ORDER BY u.created_at) FILTER (WHERE u.id IS NOT NULL),'[]') FROM incidents i JOIN monitors m ON m.id=i.monitor_id LEFT JOIN incident_updates u ON u.incident_id=i.id WHERE m.public GROUP BY i.id,m.name ORDER BY i.started_at DESC LIMIT 20`)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -271,11 +290,14 @@ func (a *app) publicStatus(w http.ResponseWriter, r *http.Request) {
 		var name, cause string
 		var started time.Time
 		var resolved *time.Time
-		if rows.Scan(&id, &name, &started, &resolved, &cause) != nil {
+		var updates []byte
+		if rows.Scan(&id, &name, &started, &resolved, &cause, &updates) != nil {
 			writeError(w, 500, "database error")
 			return
 		}
-		incidents = append(incidents, map[string]any{"id": id, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause})
+		var incidentUpdates []map[string]any
+		_ = json.Unmarshal(updates, &incidentUpdates)
+		incidents = append(incidents, map[string]any{"id": id, "monitorName": name, "startedAt": started, "resolvedAt": resolved, "cause": cause, "updates": incidentUpdates})
 	}
 	if rows.Err() != nil {
 		writeError(w, 500, "database error")
@@ -346,6 +368,26 @@ func decodeInput(w http.ResponseWriter, r *http.Request) (monitorInput, error) {
 	if in.MaintenanceUntil != nil && in.MaintenanceUntil.After(time.Now().Add(366*24*time.Hour)) {
 		return in, errors.New("maintenance cannot be scheduled more than one year ahead")
 	}
+	if in.NotificationChannels == nil {
+		in.NotificationChannels = []string{"email", "webhook", "push"}
+	}
+	slices.Sort(in.NotificationChannels)
+	in.NotificationChannels = slices.Compact(in.NotificationChannels)
+	for _, channel := range in.NotificationChannels {
+		if channel != "email" && channel != "webhook" && channel != "push" {
+			return in, errors.New("notification channels must be email, webhook, or push")
+		}
+	}
+	if in.EscalationDelay < 0 || in.EscalationDelay > 86400 {
+		return in, errors.New("escalation delay must be 0-86400 seconds")
+	}
+	in.StatusComponent = strings.TrimSpace(in.StatusComponent)
+	if in.StatusComponent == "" {
+		in.StatusComponent = "Services"
+	}
+	if len(in.StatusComponent) > 100 {
+		return in, errors.New("status component must be at most 100 characters")
+	}
 	return in, nil
 }
 func defaults(in monitorInput) (bool, bool) {
@@ -378,7 +420,7 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		sum := sha256.Sum256([]byte(heartbeatToken))
 		heartbeatHash = sum[:]
 	}
-	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public,failure_threshold,recovery_threshold,maintenance_until,monitor_type,expected_keyword,heartbeat_token_hash,next_check_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10='heartbeat' THEN now()+($3::integer*interval '1 second') ELSE now() END) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.MonitorType, in.ExpectedKeyword, heartbeatHash).Scan(&id); err != nil {
+	if err := a.db.QueryRow(r.Context(), `INSERT INTO monitors(name,url,interval_seconds,timeout_seconds,active,public,failure_threshold,recovery_threshold,maintenance_until,monitor_type,expected_keyword,heartbeat_token_hash,next_check_at,notification_channels,escalation_delay_seconds,status_component) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10='heartbeat' THEN now()+($3::integer*interval '1 second') ELSE now() END,$13,$14,$15) RETURNING id`, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.MonitorType, in.ExpectedKeyword, heartbeatHash, in.NotificationChannels, in.EscalationDelay, in.StatusComponent).Scan(&id); err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
@@ -406,7 +448,7 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active, public := defaults(in)
-	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,failure_threshold=$8,recovery_threshold=$9,maintenance_until=$10,expected_keyword=$11,next_check_at=LEAST(next_check_at,now()),updated_at=now() WHERE id=$1 AND monitor_type=$12`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.ExpectedKeyword, in.MonitorType)
+	command, err := a.db.Exec(r.Context(), `UPDATE monitors SET name=$2,url=$3,interval_seconds=$4,timeout_seconds=$5,active=$6,public=$7,failure_threshold=$8,recovery_threshold=$9,maintenance_until=$10,expected_keyword=$11,next_check_at=LEAST(next_check_at,now()),updated_at=now(),notification_channels=$13,escalation_delay_seconds=$14,status_component=$15 WHERE id=$1 AND monitor_type=$12`, id, in.Name, in.URL, in.IntervalSeconds, in.TimeoutSeconds, active, public, in.FailureThreshold, in.RecoveryThreshold, in.MaintenanceUntil, in.ExpectedKeyword, in.MonitorType, in.NotificationChannels, in.EscalationDelay, in.StatusComponent)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -670,6 +712,43 @@ func (a *app) updateIncident(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
+func (a *app) createIncidentUpdate(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid incident id")
+		return
+	}
+	var in struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	in.Message = strings.TrimSpace(in.Message)
+	if (in.Status != "investigating" && in.Status != "identified" && in.Status != "monitoring" && in.Status != "resolved") || len(in.Message) < 1 || len(in.Message) > 2000 {
+		writeError(w, 400, "status or message is invalid")
+		return
+	}
+	author, _ := r.Context().Value(actorContextKey{}).(string)
+	var updateID int64
+	var created time.Time
+	err = a.db.QueryRow(r.Context(), `INSERT INTO incident_updates(incident_id,author,status,message) SELECT $1,$2,$3,$4 WHERE EXISTS (SELECT 1 FROM incidents WHERE id=$1) RETURNING id,created_at`, id, author, in.Status, in.Message).Scan(&updateID, &created)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 404, "incident not found")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	a.broadcast()
+	writeJSON(w, 201, map[string]any{"id": updateID, "status": in.Status, "message": in.Message, "createdAt": created})
+}
+
 func (a *app) uptimeReport(w http.ResponseWriter, r *http.Request) {
 	days := 30
 	if raw := r.URL.Query().Get("days"); raw != "" {
@@ -890,6 +969,213 @@ func (a *app) deleteKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if command.RowsAffected() == 0 {
 		writeError(w, 404, "key not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (a *app) listInvitations(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(r.Context(), `SELECT id,name,scope,token_prefix,expires_at,accepted_at,revoked_at,created_at FROM invitations ORDER BY created_at DESC`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var name, scope, prefix string
+		var expires, created time.Time
+		var accepted, revoked *time.Time
+		if rows.Scan(&id, &name, &scope, &prefix, &expires, &accepted, &revoked, &created) != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		items = append(items, map[string]any{"id": id, "name": name, "scope": scope, "prefix": prefix, "expiresAt": expires, "acceptedAt": accepted, "revokedAt": revoked, "createdAt": created})
+	}
+	writeJSON(w, 200, items)
+}
+
+func (a *app) createInvitation(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name           string `json:"name"`
+		Scope          string `json:"scope"`
+		ExpiresInHours int    `json:"expiresInHours"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if in.ExpiresInHours == 0 {
+		in.ExpiresInHours = 72
+	}
+	if len(in.Name) < 1 || len(in.Name) > 100 || (in.Scope != "read" && in.Scope != "write" && in.Scope != "admin") || in.ExpiresInHours < 1 || in.ExpiresInHours > 720 {
+		writeError(w, 400, "name, scope, or expiry is invalid")
+		return
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		writeError(w, 500, "could not create invitation")
+		return
+	}
+	token := "pi_" + hex.EncodeToString(secret)
+	hash := sha256.Sum256([]byte(token))
+	var id int64
+	var expires time.Time
+	err := a.db.QueryRow(r.Context(), `INSERT INTO invitations(organization_id,name,scope,token_hash,token_prefix,expires_at) VALUES((SELECT id FROM organizations ORDER BY id LIMIT 1),$1,$2,$3,$4,now()+($5*interval '1 hour')) RETURNING id,expires_at`, in.Name, in.Scope, hash[:], token[:11], in.ExpiresInHours).Scan(&id, &expires)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "scope": in.Scope, "expiresAt": expires, "token": token, "path": "/#invite=" + token})
+}
+
+func (a *app) revokeInvitation(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeError(w, 400, "invalid invitation id")
+		return
+	}
+	command, err := a.db.Exec(r.Context(), `UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1 AND accepted_at IS NULL`, id)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if command.RowsAffected() == 0 {
+		writeError(w, 404, "active invitation not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (a *app) acceptInvitation(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token string `json:"token"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil || len(in.Token) != 67 || !strings.HasPrefix(in.Token, "pi_") {
+		writeError(w, 400, "invalid invitation")
+		return
+	}
+	hash := sha256.Sum256([]byte(in.Token))
+	tx, err := a.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback(r.Context()) //nolint:errcheck
+	var invitationID, organizationID int64
+	var name, scope string
+	err = tx.QueryRow(r.Context(), `UPDATE invitations SET accepted_at=now() WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() RETURNING id,organization_id,name,scope`, hash[:]).Scan(&invitationID, &organizationID, &name, &scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 410, "invitation expired, revoked, or already used")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		writeError(w, 500, "could not create access")
+		return
+	}
+	token := "po_" + hex.EncodeToString(secret)
+	keyHash := sha256.Sum256([]byte(token))
+	if _, err := tx.Exec(r.Context(), `INSERT INTO api_keys(name,token_hash,token_prefix,scope,organization_id,invitation_id) VALUES($1,$2,$3,$4,$5,$6)`, name, keyHash[:], token[:11], scope, organizationID, invitationID); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"name": name, "scope": scope, "token": token})
+}
+
+func (a *app) vapidPublicKey(w http.ResponseWriter, _ *http.Request) {
+	key := strings.TrimSpace(os.Getenv("WEB_PUSH_VAPID_PUBLIC_KEY"))
+	if key == "" {
+		writeError(w, 404, "web push is not configured")
+		return
+	}
+	writeJSON(w, 200, map[string]string{"publicKey": key})
+}
+
+func (a *app) savePushSubscription(w http.ResponseWriter, r *http.Request) {
+	keyID, ok := r.Context().Value(apiKeyContextKey{}).(int64)
+	if !ok {
+		writeError(w, 400, "use a member access key to subscribe")
+		return
+	}
+	var in struct {
+		Endpoint string `json:"endpoint"`
+		Keys     struct {
+			P256DH string `json:"p256dh"`
+			Auth   string `json:"auth"`
+		} `json:"keys"`
+		MonitorIDs []int64 `json:"monitorIds"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil || len(in.Endpoint) < 1 || len(in.Endpoint) > 4096 || in.Keys.P256DH == "" || in.Keys.Auth == "" || len(in.MonitorIDs) > 1000 {
+		writeError(w, 400, "invalid push subscription")
+		return
+	}
+	parsed, err := url.Parse(in.Endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		writeError(w, 400, "push endpoint must be HTTPS")
+		return
+	}
+	tx, err := a.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback(r.Context()) //nolint:errcheck
+	var subscriptionID int64
+	err = tx.QueryRow(r.Context(), `INSERT INTO web_push_subscriptions(api_key_id,endpoint,p256dh,auth) VALUES($1,$2,$3,$4) ON CONFLICT (api_key_id,endpoint) DO UPDATE SET p256dh=EXCLUDED.p256dh,auth=EXCLUDED.auth RETURNING id`, keyID, in.Endpoint, in.Keys.P256DH, in.Keys.Auth).Scan(&subscriptionID)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `DELETE FROM web_push_subscription_monitors WHERE subscription_id=$1`, subscriptionID); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	for _, monitor := range in.MonitorIDs {
+		if _, err = tx.Exec(r.Context(), `INSERT INTO web_push_subscription_monitors(subscription_id,monitor_id) SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM monitors WHERE id=$2) ON CONFLICT DO NOTHING`, subscriptionID, monitor); err != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (a *app) deletePushSubscription(w http.ResponseWriter, r *http.Request) {
+	keyID, ok := r.Context().Value(apiKeyContextKey{}).(int64)
+	if !ok {
+		writeError(w, 400, "use a member access key to unsubscribe")
+		return
+	}
+	var in struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&in) != nil || in.Endpoint == "" {
+		writeError(w, 400, "invalid subscription")
+		return
+	}
+	_, err := a.db.Exec(r.Context(), `DELETE FROM web_push_subscriptions WHERE api_key_id=$1 AND endpoint=$2`, keyID, in.Endpoint)
+	if err != nil {
+		writeError(w, 500, "database error")
 		return
 	}
 	w.WriteHeader(204)

@@ -19,24 +19,29 @@ Exit: all Phase 1 roadmap boxes and its acceptance statement are demonstrably tr
 
 ## Slice 2 — team operations foundation
 
-- Add expiring invitation links using the existing organization and role model.
-- Add per-monitor notification channels and escalation delay fields.
-- Add status-page components and operator-authored incident updates.
-- Add optional Web Push subscriptions and delivery through the existing outbox.
+- [x] Add expiring invitation links using the existing organization and role model.
+- [x] Add per-monitor notification channels and escalation delay fields.
+- [x] Add status-page components and operator-authored incident updates.
+- [x] Add optional Web Push subscriptions and delivery through the existing outbox.
 
 Exit: two operators can use independently revocable access and receive only their
 configured monitor notifications.
 
 ## Slice 3 — measured scale and observability
 
-- Add worker heartbeat visibility and region availability warnings first.
-- Establish repeatable coordinator/worker load tests and publish measured limits.
-- Add OpenTelemetry traces and example deployment dashboards.
-- Add daily/monthly rollups only after raw-check queries cross a measured budget.
-- Introduce Redis or another queue only if PostgreSQL lease contention is proven.
+- [x] Add worker heartbeat visibility and region availability warnings first.
+- [x] Establish repeatable coordinator/worker load tests and publish measured limits.
+- [x] Add OpenTelemetry traces and example Tempo/Grafana deployment dashboards.
+- [x] Measure raw-check queries and defer daily/monthly rollups below the 250 ms budget.
+- [x] Measure PostgreSQL lease throughput and defer Redis while contention is unproven.
 
 Exit: supported monitor count, check rate, failure behavior, and recovery time are
 documented from repeatable tests.
+
+Baseline: 900 monitors × 3 regions at 15 seconds, 263.98 results/second,
+32.04 ms HTTP p95, zero failed requests, 30-second worker failure detection,
+region recovery on the first claim, and abandoned-monitor recovery within the
+two-minute lease plus the normal 2-second poll.
 
 ## Release gate
 

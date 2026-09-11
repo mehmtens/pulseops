@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "PulseOps API", "version": "1.2.0", "description": "Self-hosted HTTP, heartbeat, TCP, and DNS monitoring API." },
+  "info": { "title": "PulseOps API", "version": "3.0.0", "description": "Self-hosted HTTP, heartbeat, TCP, and DNS monitoring API." },
   "servers": [{ "url": "/" }],
   "components": {
     "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -16,14 +16,18 @@
           "url": { "type": "string", "format": "uri" }, "expectedKeyword": { "type": "string", "maxLength": 500 },
           "intervalSeconds": { "type": "integer", "minimum": 15, "maximum": 86400 }, "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
           "failureThreshold": { "type": "integer", "minimum": 1, "maximum": 10 }, "recoveryThreshold": { "type": "integer", "minimum": 1, "maximum": 10 },
-          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "active": { "type": "boolean" }, "public": { "type": "boolean" }
+          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "active": { "type": "boolean" }, "public": { "type": "boolean" },
+          "notificationChannels": { "type": "array", "uniqueItems": true, "items": { "enum": ["email", "webhook", "push"] } },
+          "escalationDelaySeconds": { "type": "integer", "minimum": 0, "maximum": 86400 }, "statusComponent": { "type": "string", "maxLength": 100 }
         }
       },
       "Monitor": {
         "type": "object",
         "properties": {
           "id": { "type": "integer", "format": "int64" }, "name": { "type": "string" },
-          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "maintenanceActive": { "type": "boolean" }
+          "maintenanceUntil": { "type": ["string", "null"], "format": "date-time" }, "maintenanceActive": { "type": "boolean" },
+          "notificationChannels": { "type": "array", "items": { "enum": ["email", "webhook", "push"] } },
+          "escalationDelaySeconds": { "type": "integer" }, "statusComponent": { "type": "string" }
         }
       },
       "MaintenanceScheduleInput": {
@@ -50,6 +54,7 @@
     "/api/readyz": { "get": { "summary": "Database readiness", "responses": { "200": { "description": "Ready" }, "503": { "description": "Unavailable" } } } },
     "/api/status": { "get": { "summary": "Public monitor and incident status", "responses": { "200": { "description": "Public status" } } } },
     "/api/events": { "get": { "summary": "Status Server-Sent Events", "responses": { "200": { "description": "Event stream" } } } },
+    "/api/openapi.json": { "get": { "summary": "OpenAPI 3.1 document", "responses": { "200": { "description": "API contract" } } } },
     "/api/heartbeat/{token}": { "post": { "summary": "Record a heartbeat", "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "204": { "description": "Heartbeat recorded" }, "404": { "description": "Unknown heartbeat" } } } },
     "/api/monitors": {
       "get": { "summary": "List monitors", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Monitor list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Monitor" } } } } } } },
@@ -59,6 +64,7 @@
       "put": { "summary": "Update a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Monitor updated" } } },
       "delete": { "summary": "Delete a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Monitor deleted" } } }
     },
+    "/api/monitors/{id}/checks": { "get": { "summary": "List the latest 100 checks for a monitor", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Check history" } } } },
     "/api/maintenance-schedules": {
       "get": { "summary": "List all recurring maintenance schedules", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Maintenance schedule list" } } }
     },
@@ -70,12 +76,21 @@
       "delete": { "summary": "Delete a recurring maintenance schedule", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/scheduleId" }], "responses": { "204": { "description": "Maintenance schedule deleted" } } }
     },
     "/api/incidents": { "get": { "summary": "List incidents", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Incident list" } } } },
+    "/api/incidents/{id}": { "patch": { "summary": "Acknowledge an incident and update its internal note", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "200": { "description": "Incident updated" } } } },
+    "/api/incidents/{id}/updates": { "post": { "summary": "Publish an operator-authored incident update", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "201": { "description": "Update published" } } } },
     "/api/reports/uptime": { "get": { "summary": "Generate a 1–90 day uptime report", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Uptime report" } } } },
     "/api/keys": { "get": { "summary": "List team access keys (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Access key list" } } }, "post": { "summary": "Create a viewer, operator, or admin access key", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Key and one-time secret" } } } },
+    "/api/keys/{id}": { "delete": { "summary": "Revoke a team access key (admin)", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Access key revoked" } } } },
+    "/api/invitations": { "get": { "summary": "List invitations (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Invitation list" } } }, "post": { "summary": "Create an expiring invitation (admin)", "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Invitation and one-time link" } } } },
+    "/api/invitations/{id}": { "delete": { "summary": "Revoke an unused invitation (admin)", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Invitation revoked" } } } },
+    "/api/invitations/accept": { "post": { "summary": "Accept a valid one-time invitation", "responses": { "201": { "description": "Member access token" }, "410": { "description": "Invitation unavailable" } } } },
+    "/api/push/vapid-public-key": { "get": { "summary": "Get the Web Push application key", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "VAPID public key" } } } },
+    "/api/push/subscription": { "put": { "summary": "Create or update the current member's monitor-scoped Web Push subscription", "security": [{ "bearerAuth": [] }], "responses": { "204": { "description": "Subscription saved" } } }, "delete": { "summary": "Delete the current member's Web Push subscription", "security": [{ "bearerAuth": [] }], "responses": { "204": { "description": "Subscription removed" } } } },
     "/api/organization": { "get": { "summary": "Get organization profile", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Organization profile" } } }, "put": { "summary": "Update organization profile (admin)", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Updated organization profile" } } } },
     "/api/worker/claim": { "post": { "summary": "Lease a due check to a regional worker", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Leased check" }, "204": { "description": "No work due" } } } },
     "/api/worker/results/{id}": { "post": { "summary": "Submit a leased regional check result", "security": [{ "bearerAuth": [] }], "parameters": [{ "$ref": "#/components/parameters/id" }], "responses": { "204": { "description": "Result recorded" }, "409": { "description": "Lease expired or consumed" } } } }
     ,"/api/audit": { "get": { "summary": "List recent successful mutations (admin); add format=csv to export", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Audit event list or CSV export" } } } },
-    "/api/notifications/metrics": { "get": { "summary": "Read notification delivery metrics", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Delivery queue metrics" } } } }
+    "/api/notifications/metrics": { "get": { "summary": "Read notification delivery metrics", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Delivery queue metrics" } } } },
+    "/api/workers": { "get": { "summary": "Read regional worker heartbeats and availability warnings", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Worker fleet status" } } } }
   }
 }

@@ -34,25 +34,31 @@ bounded, and the full Go/frontend test suites pass in CI.
 
 ## Phase 2 — team operations
 
-- [ ] Add invitations and expiring member access links on top of the existing
+- [x] Add invitations and expiring member access links on top of the existing
   token roles.
-- [ ] Add per-monitor notification policies and escalation delays.
-- [ ] Add status-page incident updates and component grouping.
-- [ ] Add optional Web Push notifications for the existing PWA.
+- [x] Add per-monitor notification policies and escalation delays.
+- [x] Add status-page incident updates and component grouping.
+- [x] Add optional Web Push notifications for the existing PWA.
 
 Acceptance: two operators can work on different monitors, receive only the
 configured alerts, and revoke access without restarting the service.
 
 ## Phase 3 — scale when measured
 
-- [ ] Add long-term daily/monthly rollups when raw-check queries become slow.
-- [ ] Add worker health/heartbeat visibility and region availability warnings.
-- [ ] Add OpenTelemetry traces and deployment-specific dashboards.
-- [ ] Add queue or Redis only if PostgreSQL lease throughput is demonstrated to
-  be the bottleneck.
+- [x] Measure the raw-check query budget; defer daily/monthly rollups while the
+  30-day query remains below 250 ms (3.77 ms in the baseline profile).
+- [x] Add worker health/heartbeat visibility and region availability warnings.
+- [x] Add OpenTelemetry traces and a provisioned Tempo/Grafana deployment dashboard.
+- [x] Measure PostgreSQL lease throughput; retain PostgreSQL while contention is
+  unproven (zero failures at 263.98 results/second in the baseline profile).
 
 Acceptance: load tests document the monitor count, check rate, and recovery
 behavior supported by one coordinator and a worker fleet.
+
+Baseline acceptance: 900 monitors checked every 15 seconds from three regions,
+2,700/2,700 results accepted, HTTP p95 32.04 ms, and 263.98 results/second on the
+documented Docker Desktop host. See README “Measured capacity” for the repeatable
+command, failure behavior, recovery bounds, and scale-up gates.
 
 ## Deliberately deferred
 

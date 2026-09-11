@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthAndAuth(t *testing.T) {
@@ -118,6 +119,18 @@ func TestDecodeInput(t *testing.T) {
 	}
 }
 
+func TestMonitorNotificationPolicyValidation(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(`{"name":"Site","url":"https://example.com","notificationChannels":["push","email","push"],"escalationDelaySeconds":60,"statusComponent":"Customer API"}`))
+	input, err := decodeInput(httptest.NewRecorder(), request)
+	if err != nil || len(input.NotificationChannels) != 2 || input.EscalationDelay != 60 || input.StatusComponent != "Customer API" {
+		t.Fatalf("unexpected policy: %+v, %v", input, err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(`{"name":"Site","url":"https://example.com","notificationChannels":["sms"]}`))
+	if _, err := decodeInput(httptest.NewRecorder(), request); err == nil {
+		t.Fatal("unsupported channel was accepted")
+	}
+}
+
 func TestHeartbeatInputAndContentMatch(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/monitors", strings.NewReader(`{"name":"Nightly backup","monitorType":"heartbeat","intervalSeconds":3600}`))
 	input, err := decodeInput(httptest.NewRecorder(), request)
@@ -153,13 +166,16 @@ func TestOpenAPIDocument(t *testing.T) {
 		t.Fatalf("got %d, want 200", response.Code)
 	}
 	paths := document["paths"].(map[string]any)
-	if paths["/api/maintenance-schedules"] == nil || paths["/api/monitors/{id}/maintenance-schedules"] == nil {
-		t.Fatal("maintenance schedule endpoints are missing from OpenAPI")
+	if paths["/api/maintenance-schedules"] == nil || paths["/api/monitors/{id}/maintenance-schedules"] == nil || paths["/api/invitations"] == nil || paths["/api/push/subscription"] == nil || paths["/api/incidents/{id}/updates"] == nil {
+		t.Fatal("documented endpoints are missing from OpenAPI")
 	}
 	schemas := document["components"].(map[string]any)["schemas"].(map[string]any)
 	monitor := schemas["Monitor"].(map[string]any)
 	if monitor["properties"].(map[string]any)["maintenanceActive"] == nil {
 		t.Fatal("maintenanceActive is missing from the Monitor schema")
+	}
+	if monitor["properties"].(map[string]any)["notificationChannels"] == nil || monitor["properties"].(map[string]any)["statusComponent"] == nil {
+		t.Fatal("team operations fields are missing from the Monitor schema")
 	}
 }
 
@@ -186,6 +202,31 @@ func TestSafeDialerRejectsPrivateAddress(t *testing.T) {
 	_, err := safeDialer()(t.Context(), "tcp", "127.0.0.1:80")
 	if err == nil || !strings.Contains(err.Error(), "private or local") {
 		t.Fatalf("expected private-address rejection, got %v", err)
+	}
+}
+
+func TestWebPushClientRejectsPrivateAddress(t *testing.T) {
+	transport := webPushClient().Transport.(*http.Transport)
+	_, err := transport.DialContext(t.Context(), "tcp", "127.0.0.1:443")
+	if err == nil || !strings.Contains(err.Error(), "private or local") {
+		t.Fatalf("expected push SSRF rejection, got %v", err)
+	}
+}
+
+func TestWorkerResultRetriesTransientFailure(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	err := submitWorkerResult(t.Context(), server.Client(), server.URL, strings.Repeat("w", 32), "eu-west", 1, []byte(`{"up":true}`), time.Millisecond)
+	if err != nil || attempts != 2 {
+		t.Fatalf("err=%v attempts=%d, want transient retry then success", err, attempts)
 	}
 }
 

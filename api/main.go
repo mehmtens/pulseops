@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,11 +29,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if coordinator := os.Getenv("PULSEOPS_COORDINATOR_URL"); coordinator != "" {
+		shutdownTelemetry, err := initTelemetry(ctx, "pulseops-worker-"+env("PULSEOPS_WORKER_REGION", "local"))
+		if err != nil {
+			log.Fatalf("configure telemetry: %v", err)
+		}
+		defer shutdownTelemetry(context.Background()) //nolint:errcheck
 		if err := runWorker(ctx, coordinator, os.Getenv("PULSEOPS_WORKER_TOKEN"), env("PULSEOPS_WORKER_REGION", "local")); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
+	shutdownTelemetry, err := initTelemetry(ctx, "pulseops-coordinator")
+	if err != nil {
+		log.Fatalf("configure telemetry: %v", err)
+	}
+	defer shutdownTelemetry(context.Background()) //nolint:errcheck
 	databaseURL, token := os.Getenv("DATABASE_URL"), os.Getenv("PULSEOPS_API_TOKEN")
 	if databaseURL == "" || len(token) < 16 {
 		log.Fatal("DATABASE_URL and PULSEOPS_API_TOKEN (at least 16 characters) are required")
@@ -88,6 +99,10 @@ func waitDatabase(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration
 }
 
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return migrateTo(ctx, pool, math.MaxInt64)
+}
+
+func migrateTo(ctx context.Context, pool *pgxpool.Pool, targetVersion int64) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -110,6 +125,9 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		version, err := strconv.ParseInt(strings.SplitN(base, "_", 2)[0], 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid migration %s", path)
+		}
+		if version > targetVersion {
+			continue
 		}
 		var applied bool
 		if err := conn.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", version).Scan(&applied); err != nil {

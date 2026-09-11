@@ -12,11 +12,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type dueMonitor struct {
@@ -149,13 +153,16 @@ func safeDialer() func(context.Context, string, string) (net.Conn, error) {
 }
 
 func performCheck(parent context.Context, item dueMonitor) checkResult {
+	ctx, span := otel.Tracer("pulseops/checker").Start(parent, "monitor.check")
+	span.SetAttributes(attribute.Int64("monitor.id", item.id), attribute.String("monitor.type", item.monitorType), attribute.String("worker.region", item.region))
+	defer span.End()
 	if item.monitorType == "heartbeat" {
 		return failedResult(0, errors.New("heartbeat overdue"))
 	}
 	if item.monitorType == "tcp" || item.monitorType == "dns" {
-		return performNetworkCheck(parent, item)
+		return performNetworkCheck(ctx, item)
 	}
-	ctx, cancel := context.WithTimeout(parent, time.Duration(item.timeoutSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(item.timeoutSeconds)*time.Second)
 	defer cancel()
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: safeDialer(), TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: time.Duration(item.timeoutSeconds) * time.Second, DisableKeepAlives: true}
 	client := http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -226,13 +233,18 @@ func failedResult(ms int, err error) checkResult {
 }
 
 func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResult) error {
+	ctx, span := otel.Tracer("pulseops/checker").Start(ctx, "check.record")
+	span.SetAttributes(attribute.Int64("monitor.id", item.id), attribute.String("worker.region", item.region), attribute.Bool("check.up", result.up))
+	defer span.End()
 	tx, err := a.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var maintenance bool
-	if err := tx.QueryRow(ctx, `SELECT `+maintenanceActive+` FROM monitors m WHERE m.id=$1 FOR UPDATE`, item.id).Scan(&maintenance); err != nil {
+	var notificationChannels []string
+	var escalationDelay int
+	if err := tx.QueryRow(ctx, `SELECT `+maintenanceActive+`,m.notification_channels,m.escalation_delay_seconds FROM monitors m WHERE m.id=$1 FOR UPDATE`, item.id).Scan(&maintenance, &notificationChannels, &escalationDelay); err != nil {
 		return err
 	}
 	region := item.region
@@ -301,8 +313,22 @@ func (a *app) recordCheck(ctx context.Context, item dueMonitor, result checkResu
 		}
 	}
 	if eventKey != "" {
-		for _, channel := range configuredChannels() {
-			if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(monitor_id,event_key,subject,body,channel) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, item.id, eventKey, subject, body, channel); err != nil {
+		delay := 0
+		if strings.HasPrefix(eventKey, "incident-open:") {
+			delay = escalationDelay
+		}
+		available := configuredChannels()
+		for _, channel := range notificationChannels {
+			if !slices.Contains(available, channel) {
+				continue
+			}
+			if channel == "push" {
+				if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(monitor_id,event_key,subject,body,channel,web_push_subscription_id,next_attempt_at) SELECT $1,$2,$3,$4,'push',sm.subscription_id,now()+($5*interval '1 second') FROM web_push_subscription_monitors sm WHERE sm.monitor_id=$1 ON CONFLICT DO NOTHING`, item.id, eventKey, subject, body, delay); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(monitor_id,event_key,subject,body,channel,next_attempt_at) VALUES($1,$2,$3,$4,$5,now()+($6*interval '1 second')) ON CONFLICT DO NOTHING`, item.id, eventKey, subject, body, channel, delay); err != nil {
 				return err
 			}
 		}
@@ -343,27 +369,28 @@ func (a *app) deliverNotifications(ctx context.Context) {
 	if len(channels) == 0 {
 		return
 	}
-	rows, err := a.db.Query(ctx, `WITH due AS (SELECT id FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() AND channel=ANY($1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10) UPDATE notification_deliveries n SET attempts=n.attempts+1,next_attempt_at=now()+interval '5 minutes' FROM due WHERE n.id=due.id RETURNING n.id,n.subject,n.body,n.attempts,n.channel`, channels)
+	rows, err := a.db.Query(ctx, `WITH due AS (SELECT id FROM notification_deliveries WHERE delivered_at IS NULL AND next_attempt_at<=now() AND channel=ANY($1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10) UPDATE notification_deliveries n SET attempts=n.attempts+1,next_attempt_at=now()+interval '5 minutes' FROM due WHERE n.id=due.id RETURNING n.id,n.subject,n.body,n.attempts,n.channel,(SELECT endpoint FROM web_push_subscriptions WHERE id=n.web_push_subscription_id),(SELECT p256dh FROM web_push_subscriptions WHERE id=n.web_push_subscription_id),(SELECT auth FROM web_push_subscriptions WHERE id=n.web_push_subscription_id)`, channels)
 	if err != nil {
 		log.Printf("notification queue: %v", err)
 		return
 	}
 	type pending struct {
-		id            int64
-		subject, body string
-		attempts      int
-		channel       string
+		id                     int64
+		subject, body          string
+		attempts               int
+		channel                string
+		endpoint, p256dh, auth *string
 	}
 	items := []pending{}
 	for rows.Next() {
 		var item pending
-		if rows.Scan(&item.id, &item.subject, &item.body, &item.attempts, &item.channel) == nil {
+		if rows.Scan(&item.id, &item.subject, &item.body, &item.attempts, &item.channel, &item.endpoint, &item.p256dh, &item.auth) == nil {
 			items = append(items, item)
 		}
 	}
 	rows.Close()
 	for _, item := range items {
-		if err := sendNotification(item.channel, item.subject, item.body); err == nil {
+		if err := sendNotification(item.channel, item.subject, item.body, item.endpoint, item.p256dh, item.auth); err == nil {
 			_, _ = a.db.Exec(ctx, `UPDATE notification_deliveries SET delivered_at=now() WHERE id=$1`, item.id)
 		} else {
 			delay := 1 << min(item.attempts, 8)
@@ -381,14 +408,41 @@ func configuredChannels() []string {
 	if os.Getenv("ALERT_WEBHOOK_URL") != "" {
 		channels = append(channels, "webhook")
 	}
+	if os.Getenv("WEB_PUSH_VAPID_PUBLIC_KEY") != "" && os.Getenv("WEB_PUSH_VAPID_PRIVATE_KEY") != "" && os.Getenv("WEB_PUSH_SUBJECT") != "" {
+		channels = append(channels, "push")
+	}
 	return channels
 }
 
-func sendNotification(channel, subject, body string) error {
+func sendNotification(channel, subject, body string, endpoint, p256dh, auth *string) error {
 	if channel == "email" {
 		return sendBrevo(subject, body)
 	}
+	if channel == "push" {
+		if endpoint == nil || p256dh == nil || auth == nil {
+			return errors.New("push subscription is missing")
+		}
+		return sendWebPush(subject, body, *endpoint, *p256dh, *auth)
+	}
 	return sendWebhook(subject, body)
+}
+
+func sendWebPush(subject, body, endpoint, p256dh, auth string) error {
+	payload, _ := json.Marshal(map[string]string{"title": subject, "body": body, "url": "/"})
+	client := webPushClient()
+	response, err := webpush.SendNotification(payload, &webpush.Subscription{Endpoint: endpoint, Keys: webpush.Keys{P256dh: p256dh, Auth: auth}}, &webpush.Options{HTTPClient: client, Subscriber: os.Getenv("WEB_PUSH_SUBJECT"), VAPIDPublicKey: os.Getenv("WEB_PUSH_VAPID_PUBLIC_KEY"), VAPIDPrivateKey: os.Getenv("WEB_PUSH_VAPID_PRIVATE_KEY"), TTL: 300})
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("status %d", response.StatusCode)
+	}
+	return nil
+}
+
+func webPushClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: safeDialer(), TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 10 * time.Second}}
 }
 
 func sendWebhook(subject, body string) error {

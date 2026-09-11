@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type workerJob struct {
@@ -39,6 +41,14 @@ type workerResult struct {
 	Message              *string    `json:"message"`
 	CertificateExpiresAt *time.Time `json:"certificateExpiresAt"`
 	Lease                string     `json:"lease"`
+}
+
+func (a *app) touchWorker(ctx context.Context, region, event string) error {
+	claimed, result := event == "claim", event == "result"
+	_, err := a.db.Exec(ctx, `INSERT INTO worker_heartbeats(region,started_at,last_seen_at,last_claimed_at,last_result_at,offline_after_seconds,claims,results)
+		VALUES($1,now(),now(),CASE WHEN $2 THEN now() END,CASE WHEN $3 THEN now() END,$4,CASE WHEN $2 THEN 1 ELSE 0 END,CASE WHEN $3 THEN 1 ELSE 0 END)
+		ON CONFLICT (region) DO UPDATE SET last_seen_at=now(),last_claimed_at=CASE WHEN $2 THEN now() ELSE worker_heartbeats.last_claimed_at END,last_result_at=CASE WHEN $3 THEN now() ELSE worker_heartbeats.last_result_at END,offline_after_seconds=$4,claims=worker_heartbeats.claims+CASE WHEN $2 THEN 1 ELSE 0 END,results=worker_heartbeats.results+CASE WHEN $3 THEN 1 ELSE 0 END`, region, claimed, result, int(workerOfflineAfter().Seconds()))
+	return err
 }
 
 func validRegion(region string) bool {
@@ -69,6 +79,10 @@ func (a *app) claimWorkerJob(w http.ResponseWriter, r *http.Request) {
 	region := r.Header.Get("X-PulseOps-Region")
 	if !validRegion(region) {
 		writeError(w, 400, "invalid worker region")
+		return
+	}
+	if err := a.touchWorker(r.Context(), region, "claim"); err != nil {
+		writeError(w, 500, "database error")
 		return
 	}
 	secret := make([]byte, 32)
@@ -139,6 +153,10 @@ func (a *app) submitWorkerResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database error")
 		return
 	}
+	if err := a.touchWorker(r.Context(), region, "result"); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
 	a.broadcast()
 	w.WriteHeader(204)
 }
@@ -147,7 +165,7 @@ func runWorker(ctx context.Context, coordinator, token, region string) error {
 	if len(token) < 32 || !validRegion(region) {
 		return errors.New("PULSEOPS_WORKER_TOKEN (32+ characters) and a valid PULSEOPS_WORKER_REGION are required")
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
+	client := &http.Client{Timeout: 45 * time.Second, Transport: traceHTTPTransport()}
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(coordinator, "/")+"/api/worker/claim", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -172,8 +190,16 @@ func runWorker(ctx context.Context, coordinator, token, region string) error {
 			continue
 		}
 		if response.StatusCode != 200 {
+			status := response.StatusCode
 			response.Body.Close()
-			return fmt.Errorf("worker claim status %d", response.StatusCode)
+			if status == http.StatusTooManyRequests || status >= 500 {
+				log.Printf("worker claim status %d; retrying", status)
+				if !waitWorkerRetry(ctx, 5*time.Second) {
+					return nil
+				}
+				continue
+			}
+			return fmt.Errorf("worker claim status %d", status)
 		}
 		var job workerJob
 		err = json.NewDecoder(response.Body).Decode(&job)
@@ -182,20 +208,59 @@ func runWorker(ctx context.Context, coordinator, token, region string) error {
 			return err
 		}
 		item := dueMonitor{id: job.ID, name: job.Name, url: job.URL, monitorType: job.MonitorType, expectedKeyword: job.ExpectedKeyword, timeoutSeconds: job.TimeoutSeconds, intervalSeconds: job.IntervalSeconds, failureThreshold: job.FailureThreshold, recoveryThreshold: job.RecoveryThreshold, maintenance: job.Maintenance}
-		checked := performCheck(ctx, item)
+		jobContext, span := otel.Tracer("pulseops/worker").Start(ctx, "worker.job")
+		span.SetAttributes(attribute.Int64("monitor.id", job.ID), attribute.String("worker.region", region), attribute.String("monitor.type", job.MonitorType))
+		item.region = region
+		checked := performCheck(jobContext, item)
 		payload, _ := json.Marshal(workerResult{Up: checked.up, StatusCode: checked.statusCode, ResponseMS: checked.responseMS, Message: checked.message, CertificateExpiresAt: checked.certificateExpiresAt, Lease: job.Lease})
-		req, _ = http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/worker/results/%d", strings.TrimRight(coordinator, "/"), job.ID), bytes.NewReader(payload))
+		err = submitWorkerResult(jobContext, client, strings.TrimRight(coordinator, "/"), token, region, job.ID, payload, 5*time.Second)
+		span.End()
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			log.Printf("worker result abandoned: %v", err)
+		}
+	}
+}
+
+func waitWorkerRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func submitWorkerResult(ctx context.Context, client *http.Client, coordinator, token, region string, id int64, payload []byte, retryDelay time.Duration) error {
+	for {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/worker/results/%d", coordinator, id), bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("X-PulseOps-Region", region)
 		req.Header.Set("Content-Type", "application/json")
-		response, err = client.Do(req)
+		response, err := client.Do(req)
 		if err != nil {
-			log.Printf("worker result: %v", err)
+			log.Printf("worker result: %v; retrying", err)
+			if !waitWorkerRetry(ctx, retryDelay) {
+				return ctx.Err()
+			}
 			continue
 		}
+		status := response.StatusCode
 		response.Body.Close()
-		if response.StatusCode != 204 {
-			log.Printf("worker result status %d", response.StatusCode)
+		if status == http.StatusNoContent {
+			return nil
 		}
+		if status == http.StatusTooManyRequests || status >= 500 {
+			log.Printf("worker result status %d; retrying", status)
+			if !waitWorkerRetry(ctx, retryDelay) {
+				return ctx.Err()
+			}
+			continue
+		}
+		return fmt.Errorf("worker result status %d", status)
 	}
 }

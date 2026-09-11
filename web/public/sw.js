@@ -14,6 +14,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url)
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return
+  if (url.search) return
 
   event.respondWith(
     fetch(event.request)
@@ -26,4 +27,14 @@ self.addEventListener('fetch', event => {
       })
       .catch(() => caches.match(event.request).then(response => response || caches.match('/')))
   )
+})
+
+self.addEventListener('push', event => {
+  const data = event.data ? event.data.json() : { title: 'PulseOps', body: 'Monitor status changed.', url: '/' }
+  event.waitUntil(self.registration.showNotification(data.title, { body: data.body, icon: '/pulseops-icon.svg', badge: '/pulseops-icon.svg', data: { url: data.url || '/' } }))
+})
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close()
+  event.waitUntil(clients.openWindow(event.notification.data?.url || '/'))
 })

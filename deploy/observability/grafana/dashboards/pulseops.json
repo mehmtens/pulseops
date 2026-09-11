@@ -1,0 +1,20 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"id":1,"type":"stat","title":"Active monitors","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"table","rawSql":"SELECT count(*) AS value FROM monitors WHERE active","refId":"A"}],"gridPos":{"h":6,"w":6,"x":0,"y":0}},
+    {"id":2,"type":"stat","title":"Checks / minute","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"table","rawSql":"SELECT count(*) AS value FROM checks WHERE checked_at > now() - interval '1 minute'","refId":"A"}],"gridPos":{"h":6,"w":6,"x":6,"y":0}},
+    {"id":3,"type":"stat","title":"Online worker regions","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"table","rawSql":"SELECT count(*) AS value FROM worker_heartbeats WHERE last_seen_at > now() - make_interval(secs => offline_after_seconds)","refId":"A"}],"gridPos":{"h":6,"w":6,"x":12,"y":0}},
+    {"id":4,"type":"stat","title":"Expired leases","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"table","rawSql":"SELECT count(*) AS value FROM worker_leases WHERE lease_until < now()","refId":"A"}],"gridPos":{"h":6,"w":6,"x":18,"y":0}},
+    {"id":5,"type":"timeseries","title":"Check rate by region","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"time_series","rawSql":"SELECT $__timeGroupAlias(checked_at,'1m'), region AS metric, count(*) AS value FROM checks WHERE $__timeFilter(checked_at) GROUP BY 1,2 ORDER BY 1","refId":"A"}],"gridPos":{"h":9,"w":12,"x":0,"y":6}},
+    {"id":6,"type":"timeseries","title":"Response time p95","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"time_series","rawSql":"SELECT $__timeGroupAlias(checked_at,'1m'), percentile_cont(0.95) WITHIN GROUP (ORDER BY response_ms) AS value FROM checks WHERE $__timeFilter(checked_at) GROUP BY 1 ORDER BY 1","refId":"A"}],"gridPos":{"h":9,"w":12,"x":12,"y":6}},
+    {"id":7,"type":"table","title":"Worker heartbeats","datasource":{"type":"postgres","uid":"pulseops-postgres"},"targets":[{"format":"table","rawSql":"SELECT region,last_seen_at,last_result_at,offline_after_seconds,claims,results,CASE WHEN last_seen_at > now()-make_interval(secs => offline_after_seconds) THEN 'online' ELSE 'offline' END AS state FROM worker_heartbeats ORDER BY region","refId":"A"}],"gridPos":{"h":8,"w":24,"x":0,"y":15}}
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["pulseops"],
+  "time": {"from":"now-6h","to":"now"},
+  "title": "PulseOps operations",
+  "uid": "pulseops-operations",
+  "version": 1
+}

@@ -1,0 +1,66 @@
+services:
+  api:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.133.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_started
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  grafana-db-init:
+    image: postgres:17-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-pulseops}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-pulseops-local}
+      POSTGRES_DB_NAME: ${POSTGRES_DB:-pulseops}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-pulseops-grafana-local}
+    command: ["sh", "-c", "psql --dbname=\"$$POSTGRES_DB_NAME\" -v ON_ERROR_STOP=1 -v grafana_password=\"$$GRAFANA_DB_PASSWORD\" -v database=\"$$POSTGRES_DB_NAME\" -v owner=\"$$PGUSER\" -f /init/create-readonly.sql"]
+    volumes:
+      - ./deploy/observability/create-readonly.sql:/init/create-readonly.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-pulseops-local}
+      POSTGRES_DB: ${POSTGRES_DB:-pulseops}
+      GRAFANA_DB_USER: pulseops_grafana
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-pulseops-grafana-local}
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grafana-db-init:
+        condition: service_completed_successfully
+      tempo:
+        condition: service_started
+
+volumes:
+  tempo-data:
+  grafana-data:
