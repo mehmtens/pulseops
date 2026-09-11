@@ -1,6 +1,6 @@
 # Release verification
 
-Last exercised: 2026-09-10
+Last exercised: 2026-09-11
 
 ## Automated gate
 
@@ -12,7 +12,7 @@ An isolated Git snapshot was created from the complete release source with no wo
 - OpenAPI JSON and provisioned Grafana dashboard JSON parsing: pass.
 - Isolated load profile: 900 monitors across 3 regions, 2,700/2,700 results in 10.23 seconds, 263.98 results/second, 32.04 ms HTTP p95, and zero failures.
 
-The hosted GitHub Actions result remains pending until the release changes are committed and pushed to the remote repository. Do not substitute this local result for the hosted check on a protected branch.
+GitHub Actions run `34553071988` passed for the v3.0.0 release commit. The OpenTelemetry startup hotfix then passed run `34554301998` before v3.0.1 was published. Both runs completed the Go/PostgreSQL tests, clean frontend install, Vitest suite, and production build.
 
 ## Migration gate
 
@@ -54,3 +54,11 @@ The initial fallback reviews found eight P1/P2 issues. All were corrected:
 | P2 | Invitation URL | The secret is carried in a URL fragment that is never sent to the server and is removed from browser history on load. Caddy/HTML also set `no-referrer`, and the service worker refuses to cache query URLs. |
 
 After correction, `npm audit --omit=dev --audit-level=high` and `govulncheck` reported zero applicable vulnerabilities. `go vet ./...` passed. No unresolved P1/P2 correctness, security, or scaling findings remain in the reviewed diff.
+
+## Deployment exercise
+
+The local Compose deployment was backed up before rollout as a readable PostgreSQL custom archive (166 TOC entries). The pre-upgrade API image ID was recorded for rollback. Migration head reached 14 and readiness returned `ready` after deployment.
+
+Enabling the observability overlay exposed a schema-URL conflict between the upgraded OpenTelemetry resource detector and the pinned semantic-conventions package. The API failed closed rather than serving partially. v3.0.1 removes the conflicting schema from the custom resource, adds a regression test, and passed both the full local suite and hosted CI before redeployment.
+
+The final smoke test verified all six services running, Grafana 12.1.1 healthy with the **PulseOps operations** dashboard provisioned, the dashboard database role allowed SELECT and denied INSERT, and Tempo received 20 coordinator spans. The temporary test databases were removed; the pre-upgrade rollback archive was retained outside the repository.
