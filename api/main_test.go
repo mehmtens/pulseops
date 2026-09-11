@@ -213,6 +213,21 @@ func TestWebPushClientRejectsPrivateAddress(t *testing.T) {
 	}
 }
 
+func TestTelemetryResourceMergesWithoutSchemaConflict(t *testing.T) {
+	res, err := telemetryResource("pulseops-test")
+	if err != nil {
+		t.Fatalf("telemetry resource: %v", err)
+	}
+	values := map[string]string{}
+	for iter := res.Iter(); iter.Next(); {
+		item := iter.Attribute()
+		values[string(item.Key)] = item.Value.AsString()
+	}
+	if values["service.name"] != "pulseops-test" || values["service.version"] != "3.0.0" {
+		t.Fatalf("unexpected telemetry resource: %#v", values)
+	}
+}
+
 func TestWorkerResultRetriesTransientFailure(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

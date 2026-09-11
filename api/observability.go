@@ -26,13 +26,17 @@ func initTelemetry(ctx context.Context, serviceName string) (func(context.Contex
 	if err != nil {
 		return nil, err
 	}
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(serviceName), attribute.String("service.version", "1")))
+	res, err := telemetryResource(serviceName)
 	if err != nil {
 		return nil, err
 	}
 	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
 	otel.SetTracerProvider(provider)
 	return provider.Shutdown, nil
+}
+
+func telemetryResource(serviceName string) (*resource.Resource, error) {
+	return resource.Merge(resource.Default(), resource.NewSchemaless(semconv.ServiceName(serviceName), attribute.String("service.version", "3.0.0")))
 }
 
 func traceHTTPHandler(next http.Handler) http.Handler {
